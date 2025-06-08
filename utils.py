@@ -307,7 +307,7 @@ def create_colored_mask(mask, num_classes=104):
 
 def calculate_metrics(predictions, targets, num_classes):
     """
-    Calculate all segmentation metrics.
+    Calculate all segmentation metrics including pixel-level and image-level precision and recall.
     
     Args:
         predictions (torch.Tensor): Predicted masks
@@ -317,21 +317,50 @@ def calculate_metrics(predictions, targets, num_classes):
     Returns:
         dict: Dictionary containing all metrics
     """
-    # Convert to numpy for easier calculation
-    pred_np = predictions.cpu().numpy().flatten()
-    target_np = targets.cpu().numpy().flatten()
+    from tqdm import tqdm
     
-    # Calculate metrics
+    print("  Computing pixel accuracy...")
+    # Calculate basic pixel-level metrics
     pixel_acc = pixel_accuracy(predictions, targets)
+    
+    print("  Computing IoU metrics...")
     miou, class_ious = mean_iou(predictions, targets, num_classes)
+    
+    print("  Computing Dice scores...")
     dice, class_dice = dice_score(predictions, targets, num_classes)
     
+    print("  Computing image-level precision/recall...")
+    # Calculate image-level precision and recall metrics
+    image_metrics = image_level_precision_recall(predictions, targets, num_classes)
+    
+    print("  Analyzing class predictions per image...")
+    # Calculate detailed class analysis
+    class_analysis = analyze_class_predictions_per_image(predictions, targets, num_classes)
+    
     metrics = {
+        # Basic pixel-level metrics
         'pixel_accuracy': pixel_acc,
         'mean_iou': miou,
         'class_ious': class_ious,
         'dice_score': dice,
-        'class_dice': class_dice
+        'class_dice': class_dice,
+        
+        # Image-level precision/recall (class presence based)
+        'image_macro_precision': image_metrics['image_macro_precision'],
+        'image_macro_recall': image_metrics['image_macro_recall'],
+        'image_macro_f1': image_metrics['image_macro_f1'],
+        'image_class_macro_precision': image_metrics['class_macro_precision'],
+        'image_class_macro_recall': image_metrics['class_macro_recall'],
+        'image_class_macro_f1': image_metrics['class_macro_f1'],
+        'image_class_precisions': image_metrics['class_precisions'],
+        'image_class_recalls': image_metrics['class_recalls'],
+        'image_class_f1_scores': image_metrics['class_f1_scores'],
+        'per_image_precisions': image_metrics['per_image_precisions'],
+        'per_image_recalls': image_metrics['per_image_recalls'],
+        'per_image_f1_scores': image_metrics['per_image_f1_scores'],
+        
+        # Class analysis
+        'class_analysis': class_analysis
     }
     
     return metrics
@@ -496,3 +525,235 @@ class CosineAnnealingWarmupRestarts(optim.lr_scheduler._LRScheduler):
         self.last_epoch = np.floor(epoch)
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group['lr'] = lr
+
+
+
+
+
+def image_level_precision_recall(predictions, targets, num_classes, ignore_index=255):
+    """
+    Calculate image-level precision and recall based on class presence in each image.
+    
+    Args:
+        predictions (torch.Tensor): Predicted masks [N, H, W]
+        targets (torch.Tensor): Ground truth masks [N, H, W]
+        num_classes (int): Number of classes
+        ignore_index (int): Index to ignore in calculation
+    
+    Returns:
+        dict: Dictionary containing image-level precision, recall, and F1 metrics
+    """
+    from tqdm import tqdm
+    batch_size = predictions.shape[0]
+    
+    # Store per-image results
+    image_precisions = []
+    image_recalls = []
+    image_f1_scores = []
+    
+    # Per-class statistics across all images
+    class_true_positives = torch.zeros(num_classes)
+    class_false_positives = torch.zeros(num_classes)
+    class_false_negatives = torch.zeros(num_classes)
+    
+    for i in tqdm(range(batch_size), desc="    Processing images for precision/recall"):
+        pred_img = predictions[i]
+        target_img = targets[i]
+        
+        # Get unique classes present in prediction and target (excluding ignore_index)
+        pred_classes = torch.unique(pred_img)
+        target_classes = torch.unique(target_img)
+        
+        # Remove ignore_index if present
+        pred_classes = pred_classes[pred_classes != ignore_index]
+        target_classes = target_classes[target_classes != ignore_index]
+        
+        # Convert to sets for easier set operations
+        pred_set = set(pred_classes.tolist())
+        target_set = set(target_classes.tolist())
+        
+        # Calculate image-level metrics
+        if len(pred_set) == 0 and len(target_set) == 0:
+            # Both empty - perfect match
+            precision = 1.0
+            recall = 1.0
+            f1 = 1.0
+        elif len(pred_set) == 0:
+            # No predictions but has targets
+            precision = 0.0
+            recall = 0.0
+            f1 = 0.0
+        elif len(target_set) == 0:
+            # Has predictions but no targets
+            precision = 0.0
+            recall = 1.0  # or could be undefined
+            f1 = 0.0
+        else:
+            # Both have classes
+            intersection = pred_set.intersection(target_set)
+            
+            precision = len(intersection) / len(pred_set)
+            recall = len(intersection) / len(target_set)
+            
+            if precision + recall == 0:
+                f1 = 0.0
+            else:
+                f1 = 2 * (precision * recall) / (precision + recall)
+        
+        image_precisions.append(precision)
+        image_recalls.append(recall)
+        image_f1_scores.append(f1)
+        
+        # Update per-class statistics
+        for cls in range(num_classes):
+            if cls == ignore_index:
+                continue
+                
+            pred_has_class = cls in pred_set
+            target_has_class = cls in target_set
+            
+            if pred_has_class and target_has_class:
+                class_true_positives[cls] += 1
+            elif pred_has_class and not target_has_class:
+                class_false_positives[cls] += 1
+            elif not pred_has_class and target_has_class:
+                class_false_negatives[cls] += 1
+    
+    # Calculate overall metrics
+    macro_precision = np.mean(image_precisions)
+    macro_recall = np.mean(image_recalls)
+    macro_f1 = np.mean(image_f1_scores)
+    
+    # Calculate per-class precision, recall, F1
+    class_precisions = []
+    class_recalls = []
+    class_f1_scores = []
+    
+    for cls in range(num_classes):
+        tp = class_true_positives[cls]
+        fp = class_false_positives[cls]
+        fn = class_false_negatives[cls]
+        
+        if tp + fp == 0:
+            precision = float('nan')
+        else:
+            precision = tp / (tp + fp)
+            
+        if tp + fn == 0:
+            recall = float('nan')
+        else:
+            recall = tp / (tp + fn)
+            
+        if precision != precision or recall != recall or precision + recall == 0:  # NaN check
+            f1 = float('nan')
+        else:
+            f1 = 2 * (precision * recall) / (precision + recall)
+        
+        class_precisions.append(precision.item() if not np.isnan(precision) else float('nan'))
+        class_recalls.append(recall.item() if not np.isnan(recall) else float('nan'))
+        class_f1_scores.append(f1.item() if not np.isnan(f1) else float('nan'))
+    
+    # Calculate macro averages for per-class metrics
+    valid_class_precisions = [p for p in class_precisions if not np.isnan(p)]
+    valid_class_recalls = [r for r in class_recalls if not np.isnan(r)]
+    valid_class_f1s = [f for f in class_f1_scores if not np.isnan(f)]
+    
+    class_macro_precision = np.mean(valid_class_precisions) if valid_class_precisions else 0.0
+    class_macro_recall = np.mean(valid_class_recalls) if valid_class_recalls else 0.0
+    class_macro_f1 = np.mean(valid_class_f1s) if valid_class_f1s else 0.0
+    
+    return {
+        'image_macro_precision': macro_precision,
+        'image_macro_recall': macro_recall,
+        'image_macro_f1': macro_f1,
+        'class_macro_precision': class_macro_precision,
+        'class_macro_recall': class_macro_recall,
+        'class_macro_f1': class_macro_f1,
+        'per_image_precisions': image_precisions,
+        'per_image_recalls': image_recalls,
+        'per_image_f1_scores': image_f1_scores,
+        'class_precisions': class_precisions,
+        'class_recalls': class_recalls,
+        'class_f1_scores': class_f1_scores,
+        'class_true_positives': class_true_positives.tolist(),
+        'class_false_positives': class_false_positives.tolist(),
+        'class_false_negatives': class_false_negatives.tolist()
+    }
+
+
+def analyze_class_predictions_per_image(predictions, targets, num_classes, ignore_index=255):
+    """
+    Analyze which classes are predicted vs actual for each image.
+    
+    Args:
+        predictions (torch.Tensor): Predicted masks [N, H, W]
+        targets (torch.Tensor): Ground truth masks [N, H, W]
+        num_classes (int): Number of classes
+        ignore_index (int): Index to ignore
+    
+    Returns:
+        dict: Detailed analysis of class predictions per image
+    """
+    batch_size = predictions.shape[0]
+    
+    analysis = {
+        'total_images': batch_size,
+        'perfect_matches': 0,
+        'partial_matches': 0,
+        'no_matches': 0,
+        'detailed_results': []
+    }
+    
+    for i in range(batch_size):
+        pred_img = predictions[i]
+        target_img = targets[i]
+        
+        # Get unique classes
+        pred_classes = torch.unique(pred_img)
+        target_classes = torch.unique(target_img)
+        
+        # Remove ignore_index
+        pred_classes = pred_classes[pred_classes != ignore_index]
+        target_classes = target_classes[target_classes != ignore_index]
+        
+        pred_set = set(pred_classes.tolist())
+        target_set = set(target_classes.tolist())
+        
+        intersection = pred_set.intersection(target_set)
+        union = pred_set.union(target_set)
+        
+        # Calculate Jaccard index (IoU for sets)
+        if len(union) == 0:
+            jaccard = 1.0  # Both empty
+            match_type = 'perfect'
+        else:
+            jaccard = len(intersection) / len(union)
+            if jaccard == 1.0:
+                match_type = 'perfect'
+            elif jaccard > 0:
+                match_type = 'partial'
+            else:
+                match_type = 'no_match'
+        
+        # Count match types
+        if match_type == 'perfect':
+            analysis['perfect_matches'] += 1
+        elif match_type == 'partial':
+            analysis['partial_matches'] += 1
+        else:
+            analysis['no_matches'] += 1
+        
+        # Store detailed results for first few images or problematic cases
+        if i < 10 or match_type == 'no_match':
+            analysis['detailed_results'].append({
+                'image_index': i,
+                'predicted_classes': sorted(list(pred_set)),
+                'target_classes': sorted(list(target_set)),
+                'intersection': sorted(list(intersection)),
+                'only_predicted': sorted(list(pred_set - target_set)),
+                'only_target': sorted(list(target_set - pred_set)),
+                'jaccard_index': jaccard,
+                'match_type': match_type
+            })
+    
+    return analysis
