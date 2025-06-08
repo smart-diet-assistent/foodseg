@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import wandb
 import tempfile
+import time
 
 from dataset import prepare_dataset, create_dataloaders
 from model import create_model
@@ -196,7 +197,7 @@ def train():
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5, verbose=True
+        optimizer, mode='max', factor=0.5, patience=5
     )
     
     # Early stopping
@@ -257,16 +258,48 @@ def train():
         "normalization_std": STD
     }
     
-    # Initialize wandb run
-    wandb.init(
-        project=wandb_cfg["project"],
-        entity=wandb_cfg["entity"],
-        name=run_name,
-        config=wandb_config,
-        mode=wandb_cfg["mode"],
-        tags=wandb_cfg["tags"],
-        notes=wandb_cfg["notes"] or f"Training LRASPP model on FoodSeg103 with {num_classes} classes"
-    )
+    # Initialize wandb run with retry logic
+    max_retries = wandb_cfg.get("retries", 3)
+    timeout = wandb_cfg.get("timeout", 120)
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"Initializing wandb (attempt {attempt + 1}/{max_retries})...")
+            
+            # 设置环境变量以配置超时
+            os.environ['WANDB_INIT_TIMEOUT'] = str(timeout)
+            
+            wandb.init(
+                project=wandb_cfg["project"],
+                entity=wandb_cfg["entity"],
+                name=run_name,
+                config=wandb_config,
+                mode=wandb_cfg["mode"],
+                tags=wandb_cfg["tags"],
+                notes=wandb_cfg["notes"] or f"Training LRASPP model on FoodSeg103 with {num_classes} classes",
+                settings=wandb.Settings(init_timeout=timeout)
+            )
+            print("Wandb initialized successfully!")
+            break
+            
+        except Exception as e:
+            print(f"Wandb initialization failed (attempt {attempt + 1}): {e}")
+            if attempt == max_retries - 1:
+                print("All wandb connection attempts failed. Switching to offline mode...")
+                # 如果所有尝试都失败，切换到离线模式
+                wandb.init(
+                    project=wandb_cfg["project"],
+                    entity=wandb_cfg["entity"],
+                    name=run_name,
+                    config=wandb_config,
+                    mode="offline",
+                    tags=wandb_cfg["tags"],
+                    notes=wandb_cfg["notes"] or f"Training LRASPP model on FoodSeg103 with {num_classes} classes"
+                )
+                print("Wandb initialized in offline mode.")
+            else:
+                print(f"Retrying in 5 seconds...")
+                time.sleep(5)
     
     # Watch model gradients and parameters if enabled
     if wandb_cfg["watch_model"]:

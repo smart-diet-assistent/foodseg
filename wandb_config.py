@@ -20,9 +20,13 @@ SAVE_PREDICTION_ARTIFACTS = True  # Whether to save prediction visualizations
 SAVE_TRAINING_CURVES = True  # Whether to save training curves
 
 # Run settings
-WANDB_MODE = "online"  # "online", "offline", or "disabled"
+WANDB_MODE = "offline"  # "online", "offline", or "disabled" - 设置为 offline 避免连接超时
 WANDB_NOTES = None  # Additional notes for the run
 WANDB_TAGS = ["semantic-segmentation", "lraspp", "mobilenetv3", "foodseg103"]
+
+# Connection settings - 添加连接配置
+WANDB_TIMEOUT = 120  # 连接超时时间（秒）
+WANDB_RETRIES = 3    # 连接重试次数
 
 # Advanced settings
 WATCH_MODEL = True  # Whether to use wandb.watch() on the model
@@ -50,5 +54,7 @@ def get_wandb_config():
         "save_training_curves": SAVE_TRAINING_CURVES,
         "watch_model": WATCH_MODEL,
         "watch_log": WATCH_LOG,
-        "watch_log_freq": WATCH_LOG_FREQ
+        "watch_log_freq": WATCH_LOG_FREQ,
+        "timeout": WANDB_TIMEOUT,
+        "retries": WANDB_RETRIES
     }

@@ -6,9 +6,13 @@ DATASET_NAME = "EduardoPacheco/FoodSeg103"
 DATA_DIR = "./data"
 CACHE_DIR = "./cache"
 
+# Dataset filtering cache configuration
+FILTERED_CACHE_DIR = "./cache/filtered_datasets"
+ENABLE_DATASET_CACHE = True  # 是否启用数据集缓存
+
 # Model configuration
 MODEL_NAME = "lraspp_mobilenet_v3_large"
-NUM_CLASSES = 104  # 103 food classes + background
+NUM_CLASSES = 32  # 103 food classes + background
 BACKBONE = "mobilenet_v3_large"
 
 # Label filtering configuration
@@ -64,7 +68,7 @@ DESIRED_LABELS = [
 # 是否重新映射标签到连续的ID (0, 1, 2, ...)
 REMAP_LABELS = True
 # 最小像素阈值，标签在mask中的像素数少于此值的样本将被过滤
-MIN_LABEL_PIXELS = 200
+MIN_LABEL_PIXELS = 500
 
 # Training configuration
 BATCH_SIZE = 8

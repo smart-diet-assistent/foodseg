@@ -22,12 +22,14 @@ class FoodSegLRASPP(nn.Module):
         
         # Modify the classifier for our number of classes
         # The original model has 21 classes (COCO + VOC), we need 104
-        in_channels = self.model.classifier.low_classifier.in_channels
-        
+        low_channels = self.model.classifier.low_classifier.in_channels   # 40
+        # high_channels = self.model.classifier.high_classifier.in_channels  # 这里可能不是直接可用的，因为原high_classifier的输入是经过中间处理的
+        high_channels = self.model.classifier.cbr[0].in_channels
+
         # Replace the classifier
         self.model.classifier = LRASPPHead(
-            in_channels=in_channels,
-            low_channels=40,  # MobileNetV3-Large low-level feature channels
+            in_channels=high_channels,  # MobileNetV3-Large high-level feature channels
+            low_channels=low_channels,  # MobileNetV3-Large low-level feature channels
             num_classes=num_classes,
             inter_channels=128
         )

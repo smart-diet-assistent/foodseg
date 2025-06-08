@@ -10,7 +10,101 @@ import cv2
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import hashlib
+import pickle
+import json
 from config import *
+
+
+def generate_cache_key(desired_labels, min_label_pixels, remap_labels):
+    """
+    生成基于筛选参数的缓存键。
+    
+    Args:
+        desired_labels: 需要保留的标签ID列表
+        min_label_pixels: 最小像素阈值
+        remap_labels: 是否重新映射标签
+    
+    Returns:
+        str: 缓存键字符串
+    """
+    # 将参数转换为字符串并计算哈希
+    params_str = f"{sorted(desired_labels) if desired_labels else 'all'}_{min_label_pixels}_{remap_labels}"
+    cache_key = hashlib.md5(params_str.encode()).hexdigest()
+    return cache_key
+
+
+def save_filtered_dataset_cache(filtered_dataset, label_mapping, cache_key):
+    """
+    保存筛选后的数据集到缓存。
+    
+    Args:
+        filtered_dataset: 筛选后的数据集
+        label_mapping: 标签映射字典
+        cache_key: 缓存键
+    """
+    if not ENABLE_DATASET_CACHE:
+        return
+    
+    cache_dir = FILTERED_CACHE_DIR
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    cache_data = {
+        'filtered_dataset': filtered_dataset,
+        'label_mapping': label_mapping,
+        'cache_key': cache_key,
+        'desired_labels': DESIRED_LABELS,
+        'min_label_pixels': MIN_LABEL_PIXELS,
+        'remap_labels': REMAP_LABELS
+    }
+    
+    cache_file = os.path.join(cache_dir, f"filtered_dataset_{cache_key}.pkl")
+    
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache_data, f)
+        print(f"筛选后的数据集已缓存到: {cache_file}")
+    except Exception as e:
+        print(f"保存数据集缓存失败: {str(e)}")
+
+
+def load_filtered_dataset_cache(cache_key):
+    """
+    从缓存加载筛选后的数据集。
+    
+    Args:
+        cache_key: 缓存键
+    
+    Returns:
+        tuple: (filtered_dataset, label_mapping) 或 (None, None) 如果缓存不存在
+    """
+    if not ENABLE_DATASET_CACHE:
+        return None, None
+    
+    cache_dir = FILTERED_CACHE_DIR
+    cache_file = os.path.join(cache_dir, f"filtered_dataset_{cache_key}.pkl")
+    
+    if not os.path.exists(cache_file):
+        return None, None
+    
+    try:
+        with open(cache_file, 'rb') as f:
+            cache_data = pickle.load(f)
+        
+        # 验证缓存的参数是否匹配当前配置
+        if (cache_data.get('desired_labels') == DESIRED_LABELS and
+            cache_data.get('min_label_pixels') == MIN_LABEL_PIXELS and
+            cache_data.get('remap_labels') == REMAP_LABELS):
+            
+            print(f"从缓存加载筛选后的数据集: {cache_file}")
+            return cache_data['filtered_dataset'], cache_data['label_mapping']
+        else:
+            print("缓存参数不匹配当前配置，将重新筛选数据集")
+            return None, None
+            
+    except Exception as e:
+        print(f"加载数据集缓存失败: {str(e)}")
+        return None, None
 
 
 def _process_sample(args):
@@ -80,7 +174,7 @@ def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixel
     
     # 确定线程数
     if num_threads is None:
-        num_threads = min(os.cpu_count(), 16)  # 限制最大线程数为16
+        num_threads = min(os.cpu_count(), 8)  # 限制最大线程数为16
     
     print(f"指定保留的标签: {desired_labels}")
     print(f"最小像素阈值: {min_label_pixels}")
@@ -163,6 +257,30 @@ def prepare_dataset():
     # Create directories
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(FILTERED_CACHE_DIR, exist_ok=True)
+    
+    # 生成缓存键
+    cache_key = generate_cache_key(DESIRED_LABELS, MIN_LABEL_PIXELS, REMAP_LABELS)
+    print(f"数据集筛选缓存键: {cache_key}")
+    
+    # 尝试从缓存加载筛选后的数据集
+    filtered_dataset, global_label_mapping = load_filtered_dataset_cache(cache_key)
+    
+    if filtered_dataset is not None:
+        print("成功从缓存加载筛选后的数据集!")
+        
+        # 显示数据集信息
+        for split_name, split_data in filtered_dataset.items():
+            print(f"{split_name} 样本数: {len(split_data)}")
+        
+        if global_label_mapping is not None:
+            print(f"标签映射: {global_label_mapping}")
+            print(f"类别数量: {len(global_label_mapping)} (包括背景)")
+        
+        return filtered_dataset, global_label_mapping
+    
+    # 缓存不存在，需要重新筛选
+    print("缓存不存在或已过期，开始重新筛选数据集...")
     
     # Load dataset from Hugging Face
     dataset = load_dataset(DATASET_NAME, cache_dir=CACHE_DIR)
@@ -219,7 +337,101 @@ def prepare_dataset():
         food_count = len(global_label_mapping) - background_count
         print(f"背景类: {background_count}个, 食物类: {food_count}个")
     
+    # 保存筛选后的数据集到缓存
+    save_filtered_dataset_cache(filtered_dataset, global_label_mapping, cache_key)
+    
     return filtered_dataset, global_label_mapping
+
+
+def clear_dataset_cache(cache_key=None):
+    """
+    清理数据集缓存。
+    
+    Args:
+        cache_key: 特定的缓存键，None表示清理所有缓存
+    """
+    if not ENABLE_DATASET_CACHE:
+        print("数据集缓存功能未启用")
+        return
+    
+    cache_dir = FILTERED_CACHE_DIR
+    if not os.path.exists(cache_dir):
+        print("缓存目录不存在")
+        return
+    
+    if cache_key is None:
+        # 清理所有缓存
+        cache_files = [f for f in os.listdir(cache_dir) if f.startswith("filtered_dataset_") and f.endswith(".pkl")]
+        for cache_file in cache_files:
+            cache_path = os.path.join(cache_dir, cache_file)
+            try:
+                os.remove(cache_path)
+                print(f"已删除缓存文件: {cache_file}")
+            except Exception as e:
+                print(f"删除缓存文件失败 {cache_file}: {str(e)}")
+        
+        if not cache_files:
+            print("没有找到缓存文件")
+        else:
+            print(f"共删除 {len(cache_files)} 个缓存文件")
+    else:
+        # 清理特定缓存
+        cache_file = os.path.join(cache_dir, f"filtered_dataset_{cache_key}.pkl")
+        if os.path.exists(cache_file):
+            try:
+                os.remove(cache_file)
+                print(f"已删除缓存文件: filtered_dataset_{cache_key}.pkl")
+            except Exception as e:
+                print(f"删除缓存文件失败: {str(e)}")
+        else:
+            print(f"缓存文件不存在: filtered_dataset_{cache_key}.pkl")
+
+
+def list_dataset_cache():
+    """
+    列出所有可用的数据集缓存。
+    """
+    cache_dir = FILTERED_CACHE_DIR
+    if not os.path.exists(cache_dir):
+        print("缓存目录不存在")
+        return
+    
+    cache_files = [f for f in os.listdir(cache_dir) if f.startswith("filtered_dataset_") and f.endswith(".pkl")]
+    
+    if not cache_files:
+        print("没有找到缓存文件")
+        return
+    
+    print(f"找到 {len(cache_files)} 个缓存文件:")
+    for cache_file in cache_files:
+        cache_path = os.path.join(cache_dir, cache_file)
+        try:
+            with open(cache_path, 'rb') as f:
+                cache_data = pickle.load(f)
+            
+            cache_key = cache_data.get('cache_key', 'unknown')
+            desired_labels = cache_data.get('desired_labels', 'unknown')
+            min_label_pixels = cache_data.get('min_label_pixels', 'unknown')
+            remap_labels = cache_data.get('remap_labels', 'unknown')
+            
+            # 获取文件大小
+            file_size = os.path.getsize(cache_path) / (1024 * 1024)  # MB
+            
+            print(f"  {cache_file}:")
+            print(f"    缓存键: {cache_key}")
+            print(f"    筛选标签: {desired_labels}")
+            print(f"    最小像素: {min_label_pixels}")
+            print(f"    重映射标签: {remap_labels}")
+            print(f"    文件大小: {file_size:.2f} MB")
+            
+            if 'filtered_dataset' in cache_data:
+                dataset_info = cache_data['filtered_dataset']
+                for split_name, split_data in dataset_info.items():
+                    print(f"    {split_name}: {len(split_data)} 样本")
+            print()
+            
+        except Exception as e:
+            print(f"  {cache_file}: 读取失败 - {str(e)}")
 
 
 class FoodSegDataset(Dataset):
@@ -371,15 +583,30 @@ def get_class_names():
 
 if __name__ == "__main__":
     # Test dataset loading
+    print("=== 数据集缓存测试 ===")
+    
+    # 显示当前配置
+    cache_key = generate_cache_key(DESIRED_LABELS, MIN_LABEL_PIXELS, REMAP_LABELS)
+    print(f"当前配置的缓存键: {cache_key}")
+    print(f"缓存功能启用: {ENABLE_DATASET_CACHE}")
+    
+    # 列出现有缓存
+    print("\n现有缓存:")
+    list_dataset_cache()
+    
+    # 加载数据集（会自动使用缓存或创建新缓存）
+    print("\n=== 加载数据集 ===")
     dataset, label_mapping = prepare_dataset()
     
     # Test dataloader creation
+    print("\n=== 测试数据加载器 ===")
     train_loader, val_loader = create_dataloaders(dataset, label_mapping, batch_size=2)
     
     print(f"Train batches: {len(train_loader)}")
     print(f"Validation batches: {len(val_loader)}")
     
     # Test batch loading
+    print("\n=== 测试批次加载 ===")
     for images, masks in train_loader:
         print(f"Image batch shape: {images.shape}")
         print(f"Mask batch shape: {masks.shape}")
@@ -387,3 +614,6 @@ if __name__ == "__main__":
         print(f"Mask dtype: {masks.dtype}")
         print(f"Mask unique values: {torch.unique(masks)}")
         break
+    
+    print("\n=== 缓存测试完成 ===")
+    print("提示: 再次运行此脚本应该会从缓存加载数据集")
