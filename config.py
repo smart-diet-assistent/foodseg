@@ -64,7 +64,7 @@ DESIRED_LABELS = [
 # 是否重新映射标签到连续的ID (0, 1, 2, ...)
 REMAP_LABELS = True
 # 最小像素阈值，标签在mask中的像素数少于此值的样本将被过滤
-MIN_LABEL_PIXELS = 100
+MIN_LABEL_PIXELS = 200
 
 # Training configuration
 BATCH_SIZE = 8
