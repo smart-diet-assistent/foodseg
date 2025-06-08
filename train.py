@@ -17,54 +17,109 @@ from config import *
 from wandb_config import get_wandb_config
 
 
-def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs):
+def clear_gpu_memory():
+    """Clear GPU memory cache to prevent memory issues."""
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+
+def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_epochs, num_classes):
     """Train for one epoch."""
     model.train()
     total_loss = 0
     total_ce_loss = 0
     total_dice_loss = 0
     
+    # Clear GPU memory before starting epoch
+    clear_gpu_memory()
+    
     progress_bar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{total_epochs}")
     
     for batch_idx, (images, masks) in enumerate(progress_bar):
-        images = images.to(device)
-        masks = masks.to(device)
-        
-        optimizer.zero_grad()
-        
-        # Forward pass
-        outputs = model(images)
-        predictions = outputs['out']
-        
-        # Calculate loss
-        total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
-        
-        # Backward pass
-        total_loss_batch.backward()
-        optimizer.step()
-        
-        # Update metrics
-        total_loss += total_loss_batch.item()
-        total_ce_loss += ce_loss.item()
-        total_dice_loss += dice_loss.item()
-        
-        # Update progress bar
-        progress_bar.set_postfix({
-            'Loss': f'{total_loss_batch.item():.4f}',
-            'CE': f'{ce_loss.item():.4f}',
-            'Dice': f'{dice_loss.item():.4f}'
-        })
-        
-        # Log batch metrics to wandb (configurable frequency)
-        wandb_cfg = get_wandb_config()
-        if batch_idx % wandb_cfg["batch_log_frequency"] == 0:
-            wandb.log({
-                "batch/train_loss": total_loss_batch.item(),
-                "batch/train_ce_loss": ce_loss.item(),
-                "batch/train_dice_loss": dice_loss.item(),
-                "batch/learning_rate": optimizer.param_groups[0]['lr'],
-                "batch/epoch": epoch + (batch_idx / len(train_loader))
+        try:
+            # Ensure tensors are on the correct device and have proper dtype
+            images = images.to(device, dtype=torch.float32, non_blocking=True)
+            masks = masks.to(device, dtype=torch.long, non_blocking=True)
+            
+            # Validate mask values to prevent device-side assert
+            max_class_value = masks.max().item()
+            if max_class_value >= num_classes:
+                print(f"WARNING: Found mask value {max_class_value} >= num_classes {num_classes}")
+                # Clamp values to valid range
+                masks = torch.clamp(masks, 0, num_classes - 1)
+            
+            # Verify tensor shapes and dtypes
+            if images.dtype != torch.float32:
+                images = images.float()
+            if masks.dtype != torch.long:
+                masks = masks.long()
+            
+            optimizer.zero_grad()
+            
+            # Forward pass with error handling
+            try:
+                outputs = model(images)
+                predictions = outputs['out']
+            except RuntimeError as e:
+                if "cuDNN" in str(e) or "CUDA" in str(e):
+                    print(f"GPU error at batch {batch_idx}: {e}")
+                    clear_gpu_memory()
+                    # Try again with cleared memory
+                    outputs = model(images)
+                    predictions = outputs['out']
+                else:
+                    raise e
+            
+            # Calculate loss
+            total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
+            
+            # Backward pass with gradient clipping
+            total_loss_batch.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+            # Update metrics
+            total_loss += total_loss_batch.item()
+            total_ce_loss += ce_loss.item()
+            total_dice_loss += dice_loss.item()
+            
+            # Update progress bar
+            progress_bar.set_postfix({
+                'Loss': f'{total_loss_batch.item():.4f}',
+                'CE': f'{ce_loss.item():.4f}',
+                'Dice': f'{dice_loss.item():.4f}'
             })
+            
+            # Log batch metrics to wandb (configurable frequency)
+            wandb_cfg = get_wandb_config()
+            if batch_idx % wandb_cfg["batch_log_frequency"] == 0:
+                wandb.log({
+                    "batch/train_loss": total_loss_batch.item(),
+                    "batch/train_ce_loss": ce_loss.item(),
+                    "batch/train_dice_loss": dice_loss.item(),
+                    "batch/learning_rate": optimizer.param_groups[0]['lr'],
+                    "batch/epoch": epoch + (batch_idx / len(train_loader))
+                })
+            
+            # Periodically clear memory to prevent fragmentation
+            if batch_idx % 5 == 0:  # 更频繁地清理内存
+                clear_gpu_memory()
+                
+            # 删除不必要的中间变量，释放内存
+            del outputs, predictions, total_loss_batch, ce_loss, dice_loss
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e) or "cuDNN" in str(e):
+                print(f"Memory/cuDNN error at batch {batch_idx}: {e}")
+                print("Clearing cache and skipping batch...")
+                clear_gpu_memory()
+                continue
+            else:
+                raise e
     
     avg_loss = total_loss / len(train_loader)
     avg_ce_loss = total_ce_loss / len(train_loader)
@@ -80,55 +135,162 @@ def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, tot
     total_ce_loss = 0
     total_dice_loss = 0
     
-    all_predictions = []
-    all_targets = []
+    # 改为累积式计算指标，避免存储所有预测结果
+    total_pixel_correct = 0
+    total_pixels = 0
+    class_intersections = torch.zeros(num_classes, dtype=torch.long)
+    class_unions = torch.zeros(num_classes, dtype=torch.long)
+    class_dice_numerator = torch.zeros(num_classes, dtype=torch.long)
+    class_dice_denominator = torch.zeros(num_classes, dtype=torch.long)
+    
     sample_images = []
+    sample_predictions = []
+    sample_targets = []
+    
+    # Clear GPU memory before validation
+    clear_gpu_memory()
     
     progress_bar = tqdm(val_loader, desc=f"Validation Epoch {epoch+1}/{total_epochs}")
     
     with torch.no_grad():
         for batch_idx, (images, masks) in enumerate(progress_bar):
-            images = images.to(device)
-            masks = masks.to(device)
-            
-            # Store first batch for visualization
-            if batch_idx == 0:
-                sample_images = images[:4].cpu()
-            
-            # Forward pass
-            outputs = model(images)
-            predictions = outputs['out']
-            
-            # Calculate loss
-            total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
-            
-            # Update losses
-            total_loss += total_loss_batch.item()
-            total_ce_loss += ce_loss.item()
-            total_dice_loss += dice_loss.item()
-            
-            # Get predictions for metrics
-            pred_masks = torch.argmax(predictions, dim=1)
-            all_predictions.append(pred_masks.cpu())
-            all_targets.append(masks.cpu())
-            
-            progress_bar.set_postfix({
-                'Loss': f'{total_loss_batch.item():.4f}',
-                'CE': f'{ce_loss.item():.4f}',
-                'Dice': f'{dice_loss.item():.4f}'
-            })
+            try:
+                # Ensure tensors are on the correct device and have proper dtype
+                images = images.to(device, dtype=torch.float32, non_blocking=True)
+                masks = masks.to(device, dtype=torch.long, non_blocking=True)
+                
+                # Validate mask values to prevent device-side assert
+                max_class_value = masks.max().item()
+                if max_class_value >= num_classes:
+                    print(f"WARNING: Found mask value {max_class_value} >= num_classes {num_classes}")
+                    # Clamp values to valid range
+                    masks = torch.clamp(masks, 0, num_classes - 1)
+                
+                # Store first batch for visualization
+                if batch_idx == 0:
+                    sample_images = images[:4].cpu()
+                
+                # Forward pass with error handling
+                try:
+                    outputs = model(images)
+                    predictions = outputs['out']
+                except RuntimeError as e:
+                    if "cuDNN" in str(e) or "CUDA" in str(e):
+                        print(f"GPU error in validation at batch {batch_idx}: {e}")
+                        clear_gpu_memory()
+                        # Try again with cleared memory
+                        outputs = model(images)
+                        predictions = outputs['out']
+                    else:
+                        raise e
+                
+                # Calculate loss
+                total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
+                
+                # Update losses
+                total_loss += total_loss_batch.item()
+                total_ce_loss += ce_loss.item()
+                total_dice_loss += dice_loss.item()
+                
+                # Get predictions for metrics (移动到CPU立即计算指标)
+                pred_masks = torch.argmax(predictions, dim=1).cpu()
+                masks_cpu = masks.cpu()
+                
+                # Store samples for visualization (only first batch)
+                if batch_idx == 0:
+                    sample_predictions = pred_masks[:4]
+                    sample_targets = masks_cpu[:4]
+                
+                # 累积式计算指标，避免存储所有数据
+                # Pixel accuracy
+                total_pixel_correct += (pred_masks == masks_cpu).sum().item()
+                total_pixels += masks_cpu.numel()
+                
+                # IoU 和 Dice 的累积计算
+                for cls in range(num_classes):
+                    pred_cls = (pred_masks == cls)
+                    target_cls = (masks_cpu == cls)
+                    
+                    intersection = (pred_cls & target_cls).sum().item()
+                    union = (pred_cls | target_cls).sum().item()
+                    
+                    class_intersections[cls] += intersection
+                    class_unions[cls] += union
+                    
+                    # Dice score components
+                    pred_sum = pred_cls.sum().item()
+                    target_sum = target_cls.sum().item()
+                    class_dice_numerator[cls] += 2 * intersection
+                    class_dice_denominator[cls] += pred_sum + target_sum
+                
+                # 立即删除不需要的张量，释放内存
+                del pred_masks, masks_cpu, outputs, predictions
+                
+                progress_bar.set_postfix({
+                    'Loss': f'{total_loss_batch.item():.4f}',
+                    'CE': f'{ce_loss.item():.4f}',
+                    'Dice': f'{dice_loss.item():.4f}'
+                })
+                
+                # Periodically clear memory
+                if batch_idx % 5 == 0:  # 更频繁地清理内存
+                    clear_gpu_memory()
+                    
+            except RuntimeError as e:
+                if "out of memory" in str(e) or "cuDNN" in str(e):
+                    print(f"Memory/cuDNN error in validation at batch {batch_idx}: {e}")
+                    print("Clearing cache and skipping batch...")
+                    clear_gpu_memory()
+                    continue
+                else:
+                    raise e
     
-    # Calculate metrics
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
+    # 从累积结果计算最终指标
+    pixel_accuracy = total_pixel_correct / total_pixels if total_pixels > 0 else 0.0
     
-    metrics = calculate_metrics(all_predictions, all_targets, num_classes)
+    # 计算 IoU
+    class_ious = []
+    valid_ious = []
+    for cls in range(num_classes):
+        if class_unions[cls] > 0:
+            iou = class_intersections[cls].float() / class_unions[cls].float()
+            class_ious.append(iou.item())
+            valid_ious.append(iou.item())
+        else:
+            class_ious.append(float('nan'))
+    
+    mean_iou = np.mean(valid_ious) if valid_ious else 0.0
+    
+    # 计算 Dice
+    class_dice = []
+    valid_dice = []
+    for cls in range(num_classes):
+        if class_dice_denominator[cls] > 0:
+            dice = class_dice_numerator[cls].float() / class_dice_denominator[cls].float()
+            class_dice.append(dice.item())
+            valid_dice.append(dice.item())
+        else:
+            class_dice.append(float('nan'))
+    
+    dice_score = np.mean(valid_dice) if valid_dice else 0.0
+    
+    # 构建指标字典
+    metrics = {
+        'pixel_accuracy': pixel_accuracy,
+        'mean_iou': mean_iou,
+        'class_ious': class_ious,
+        'dice_score': dice_score,
+        'class_dice': class_dice
+    }
     
     avg_loss = total_loss / len(val_loader)
     avg_ce_loss = total_ce_loss / len(val_loader)
     avg_dice_loss = total_dice_loss / len(val_loader)
     
-    return avg_loss, avg_ce_loss, avg_dice_loss, metrics, all_predictions[:4], all_targets[:4], sample_images
+    # 最后清理一次内存
+    clear_gpu_memory()
+    
+    return avg_loss, avg_ce_loss, avg_dice_loss, metrics, sample_predictions, sample_targets, sample_images
 
 
 def save_checkpoint(model, optimizer, epoch, metrics, filepath):
@@ -160,6 +322,15 @@ def train():
     if torch.cuda.is_available():
         device = torch.device('cuda')
         print(f"Using CUDA: {torch.cuda.get_device_name()}")
+        
+        # Set GPU memory management
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
+        torch.backends.cudnn.deterministic = False  # Allow non-deterministic for speed
+        
+        # Clear any existing GPU memory
+        clear_gpu_memory()
+        
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         device = torch.device('mps')
         print("Using MPS (Apple Silicon)")
@@ -325,7 +496,7 @@ def train():
         
         # Training
         train_loss, train_ce_loss, train_dice_loss = train_epoch(
-            model, train_loader, criterion, optimizer, device, epoch, NUM_EPOCHS
+            model, train_loader, criterion, optimizer, device, epoch, NUM_EPOCHS, num_classes
         )
         
         # Validation
@@ -384,7 +555,8 @@ def train():
                     tmp_file.name,
                     caption=f"Epoch {epoch+1} - Predictions vs Ground Truth"
                 )
-                os.unlink(tmp_file.name)
+                # Note: Don't delete the temp file here - wandb needs it to exist when logging
+                # The temp file will be cleaned up by the OS eventually
             plt.close(fig)
         
         # Log all metrics to wandb

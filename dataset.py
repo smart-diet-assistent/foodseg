@@ -8,8 +8,6 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 import hashlib
 import pickle
 import json
@@ -107,107 +105,73 @@ def load_filtered_dataset_cache(cache_key):
         return None, None
 
 
-def _process_sample(args):
+def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixels=100):
     """
-    处理单个样本的辅助函数，用于多线程处理。
-    
-    Args:
-        args: 包含 (idx, sample, desired_labels, min_label_pixels) 的元组
-    
-    Returns:
-        tuple: (idx, has_desired_label, label_counts) 或 (idx, None, None) 如果出错
-    """
-    idx, sample, desired_labels, min_label_pixels = args
-    
-    try:
-        # 获取mask
-        mask = sample['label'] if 'label' in sample else sample['mask']
-        if isinstance(mask, Image.Image):
-            mask = np.array(mask)
-        
-        # 确保mask是单通道
-        if len(mask.shape) == 3:
-            mask = mask[:, :, 0]
-        
-        # 获取mask中的唯一标签
-        unique_labels = np.unique(mask)
-        
-        # 检查是否包含指定标签
-        has_desired_label = False
-        label_counts = {}
-        
-        for label in unique_labels:
-            if label in desired_labels:
-                label_pixels = np.sum(mask == label)
-                if label_pixels >= min_label_pixels:
-                    has_desired_label = True
-                    # 记录这个标签在当前样本中出现
-                    label_counts[label] = 1
-        
-        return idx, has_desired_label, label_counts
-        
-    except Exception as e:
-        print(f"处理样本 {idx} 时出错: {str(e)}")
-        return idx, None, None
-
-
-def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixels=100, num_threads=None):
-    """
-    筛选数据集，只保留包含指定标签的样本（多线程加速版本）。
+    筛选数据集，只保留包含指定标签的样本（单线程版本）。
     
     Args:
         dataset_split: 数据集分割（train/validation/test）
         desired_labels: 需要保留的标签ID列表，None表示保留所有标签
         min_label_pixels: 最小像素阈值，标签像素数少于此值的样本将被过滤
-        num_threads: 线程数，None表示自动选择（通常为CPU核心数）
     
     Returns:
         filtered_indices: 筛选后的有效样本索引列表
         label_mapping: 标签重新映射字典（原标签ID -> 新标签ID）
     """
-    print(f"开始筛选数据集（多线程加速）...")
+    print(f"开始筛选数据集...")
     print(f"原始样本数: {len(dataset_split)}")
     
     if desired_labels is None:
         print("未指定标签筛选，保留所有样本")
         return list(range(len(dataset_split))), None
     
-    # 确定线程数
-    if num_threads is None:
-        num_threads = min(os.cpu_count(), 8)  # 限制最大线程数为16
-    
     print(f"指定保留的标签: {desired_labels}")
     print(f"最小像素阈值: {min_label_pixels}")
-    print(f"使用线程数: {num_threads}")
     
     filtered_indices = []
     label_stats = {}
-    stats_lock = Lock()  # 用于保护label_stats的线程锁
     
-    # 准备任务参数
-    tasks = []
-    for idx in range(len(dataset_split)):
-        sample = dataset_split[idx]
-        tasks.append((idx, sample, desired_labels, min_label_pixels))
-    
-    # 使用线程池处理样本
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        # 提交所有任务
-        future_to_idx = {executor.submit(_process_sample, task): task[0] for task in tasks}
-        
-        # 处理完成的任务
-        for future in tqdm(as_completed(future_to_idx), total=len(tasks), desc="筛选样本"):
-            idx, has_desired_label, label_counts = future.result()
+    # 逐个处理样本
+    for idx in tqdm(range(len(dataset_split)), desc="筛选样本"):
+        try:
+            sample = dataset_split[idx]
+            
+            # 获取mask
+            mask = sample['label'] if 'label' in sample else sample['mask']
+            if isinstance(mask, Image.Image):
+                mask = np.array(mask)
+            
+            # 确保mask是单通道
+            if len(mask.shape) == 3:
+                mask = mask[:, :, 0]
+            
+            # 获取mask中的唯一标签
+            unique_labels = np.unique(mask)
+            
+            # 检查是否包含指定标签
+            has_desired_label = False
+            label_counts = {}
+            
+            for label in unique_labels:
+                if label in desired_labels and label != 0:  # 跳过背景标签（0）
+                    label_pixels = np.sum(mask == label)
+                    if label_pixels >= min_label_pixels:
+                        has_desired_label = True
+                        # 记录这个标签在当前样本中出现
+                        label_counts[label] = 1
             
             if has_desired_label:
                 filtered_indices.append(idx)
                 
-                # 线程安全地更新标签统计
-                with stats_lock:
-                    for label in label_counts:
-                        if label not in label_stats:
-                            label_stats[label] = 0
-                        label_stats[label] += 1
+                # 更新标签统计
+                for label in label_counts:
+                    if label not in label_stats:
+                        label_stats[label] = 0
+                    label_stats[label] += 1
+                    
+        except Exception as e:
+            print(f"处理样本 {idx} 时出错: {str(e)}")
+            continue
     
     print(f"筛选后样本数: {len(filtered_indices)}")
     print(f"筛选比例: {len(filtered_indices)/len(dataset_split)*100:.2f}%")
@@ -230,9 +194,8 @@ def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixel
         # 创建映射：背景（0）->0，其他指定标签按顺序映射为1,2,3...
         label_mapping = {}
         
-        # 如果存在背景标签0，保持映射为0
-        if 0 in label_stats:
-            label_mapping[0] = 0
+        # 背景标签总是映射为0（即使不在desired_labels中）
+        label_mapping[0] = 0
         
         # 其他指定保留的标签按顺序映射为1,2,3...
         new_label_id = 1
@@ -242,7 +205,7 @@ def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixel
                 new_label_id += 1
         
         print(f"\n标签映射: {label_mapping}")
-        print(f"映射后的类别数量: {len(label_mapping)} ")
+        print(f"映射后的类别数量: {len(label_mapping)} (包括背景)")
         print(f"指定保留的标签: {present_desired_labels}")
         
         # 所有其他标签（未在desired_labels中的）将在数据集中被映射为背景（0）
@@ -484,7 +447,10 @@ class FoodSegDataset(Dataset):
             mask = transformed['mask']
         
         # Convert mask to long tensor for CrossEntropyLoss
-        mask = torch.tensor(mask, dtype=torch.long)
+        if isinstance(mask, torch.Tensor):
+            mask = mask.clone().detach().long()
+        else:
+            mask = torch.tensor(mask, dtype=torch.long)
         
         return image, mask
 

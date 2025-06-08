@@ -19,7 +19,7 @@ BACKBONE = "mobilenet_v3_large"
 # 指定需要保留的标签ID列表，None表示保留所有标签
 # DESIRED_LABELS = [0, 1, 2, 3, 4, 5]  # 测试用：背景+5个食物类别
 DESIRED_LABELS = [
-    # 0,  # 背景
+    0,   # 背景 - 必须包含背景类
     
     # 主食谷物类
     66,  # 米饭
@@ -68,7 +68,7 @@ DESIRED_LABELS = [
 # 是否重新映射标签到连续的ID (0, 1, 2, ...)
 REMAP_LABELS = True
 # 最小像素阈值，标签在mask中的像素数少于此值的样本将被过滤
-MIN_LABEL_PIXELS = 500
+MIN_LABEL_PIXELS = 1000
 
 # Training configuration
 BATCH_SIZE = 8
