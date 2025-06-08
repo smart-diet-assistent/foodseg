@@ -1,0 +1,68 @@
+Comprehensive Evaluation Results
+===============================
+
+Model: ./models/best_model.pth
+Dataset Split: validation
+Number of Classes: 33
+
+Overall Metrics:
+----------------
+Pixel Accuracy: 0.7876
+Mean IoU: 0.3663
+Dice Score: 0.4982
+
+Precision & Recall Metrics:
+---------------------------
+Image-Level Precision & Recall (Class Presence Based):
+  Image Macro Precision: 0.8159
+  Image Macro Recall: 0.7379
+  Image Macro F1-Score: 0.7529
+
+Image-Level Class Analysis:
+  Total Images: 1907
+  Perfect Matches: 469 (24.6%)
+  Partial Matches: 1438 (75.4%)
+  No Matches: 0 (0.0%)
+
+Sample Image Predictions (first 5):
+  Image 0: Pred=[0, 18, 28], True=[0, 18, 28], Jaccard=1.000
+  Image 1: Pred=[0, 28, 30], True=[0, 28, 30], Jaccard=1.000
+  Image 2: Pred=[0, 14, 23], True=[0, 13, 14, 23], Jaccard=0.750
+  Image 3: Pred=[0], True=[0, 1, 6], Jaccard=0.333
+  Image 4: Pred=[0, 10, 13], True=[0, 13, 14], Jaccard=0.500
+
+Top 10 Classes by IoU:
+Class  0: IoU=0.7965 | Image P/R/F1=1.000/1.000/1.000
+Class 15: IoU=0.7471 | Image P/R/F1=0.928/0.890/0.908
+Class 28: IoU=0.7140 | Image P/R/F1=0.921/0.704/0.798
+Class  7: IoU=0.6894 | Image P/R/F1=0.938/0.791/0.858
+Class 30: IoU=0.6820 | Image P/R/F1=0.927/0.603/0.731
+Class 18: IoU=0.6106 | Image P/R/F1=0.848/0.786/0.816
+Class 23: IoU=0.5779 | Image P/R/F1=0.888/0.593/0.711
+Class 27: IoU=0.5095 | Image P/R/F1=0.790/0.573/0.664
+Class 14: IoU=0.4846 | Image P/R/F1=0.709/0.717/0.713
+Class  6: IoU=0.4828 | Image P/R/F1=0.895/0.607/0.723
+
+Top 10 Classes by Image-Level Precision:
+Class  0: Image Prec=1.0000, Rec=1.0000, F1=1.0000, IoU=0.7965
+Class  7: Image Prec=0.9379, Rec=0.7907, F1=0.8580, IoU=0.6894
+Class 15: Image Prec=0.9281, Rec=0.8897, F1=0.9085, IoU=0.7471
+Class 30: Image Prec=0.9268, Rec=0.6032, F1=0.7308, IoU=0.6820
+Class 28: Image Prec=0.9211, Rec=0.7035, F1=0.7977, IoU=0.7140
+Class  6: Image Prec=0.8947, Rec=0.6071, F1=0.7234, IoU=0.4828
+Class 23: Image Prec=0.8884, Rec=0.5931, F1=0.7113, IoU=0.5779
+Class  5: Image Prec=0.8519, Rec=0.4423, F1=0.5823, IoU=0.3191
+Class 18: Image Prec=0.8482, Rec=0.7864, F1=0.8161, IoU=0.6106
+Class 27: Image Prec=0.7899, Rec=0.5732, F1=0.6643, IoU=0.5095
+
+Top 10 Classes by Image-Level Recall:
+Class  0: Image Rec=1.0000, Prec=1.0000, F1=1.0000, IoU=0.7965
+Class 15: Image Rec=0.8897, Prec=0.9281, F1=0.9085, IoU=0.7471
+Class  7: Image Rec=0.7907, Prec=0.9379, F1=0.8580, IoU=0.6894
+Class 18: Image Rec=0.7864, Prec=0.8482, F1=0.8161, IoU=0.6106
+Class 21: Image Rec=0.7386, Prec=0.6589, F1=0.6965, IoU=0.4614
+Class 14: Image Rec=0.7174, Prec=0.7088, F1=0.7131, IoU=0.4846
+Class 28: Image Rec=0.7035, Prec=0.9211, F1=0.7977, IoU=0.7140
+Class 16: Image Rec=0.6667, Prec=0.6531, F1=0.6598, IoU=0.3482
+Class 10: Image Rec=0.6647, Prec=0.5246, F1=0.5864, IoU=0.3851
+Class 17: Image Rec=0.6267, Prec=0.7460, F1=0.6812, IoU=0.4765

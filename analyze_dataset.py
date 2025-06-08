@@ -86,42 +86,42 @@ def analyze_dataset_labels(dataset_split, split_name="train", max_samples=None):
 
 
 def visualize_label_distribution(stats, save_dir="./analysis_results"):
-    """可视化标签分布"""
+    """Visualize label distribution"""
     os.makedirs(save_dir, exist_ok=True)
     
     split_name = stats['split_name']
     
-    # 1. 标签出现频率（样本维度）
+    # 1. Label occurrence frequency (sample dimension)
     labels = list(stats['sample_frequencies'].keys())
     sample_freqs = list(stats['sample_frequencies'].values())
     
-    # 按频率排序
+    # Sort by frequency
     sorted_data = sorted(zip(labels, sample_freqs), key=lambda x: x[1], reverse=True)
     labels, sample_freqs = zip(*sorted_data)
     
     plt.figure(figsize=(15, 6))
     
     plt.subplot(1, 2, 1)
-    top_labels = labels[:20]  # 显示前20个最常见的标签
+    top_labels = labels[:20]  # Show top 20 most common labels
     top_freqs = sample_freqs[:20]
     
     plt.bar(range(len(top_labels)), top_freqs)
-    plt.xlabel('标签ID')
-    plt.ylabel('样本频率')
-    plt.title(f'{split_name} - 前20个最常见标签（样本维度）')
+    plt.xlabel('Label ID')
+    plt.ylabel('Sample Frequency')
+    plt.title(f'{split_name} - Top 20 Most Common Labels (Sample Dimension)')
     plt.xticks(range(len(top_labels)), top_labels, rotation=45)
     plt.grid(True, alpha=0.3)
     
-    # 2. 标签像素频率
+    # 2. Label pixel frequency
     pixel_freqs = [stats['label_frequencies'][label] for label in labels]
     
     plt.subplot(1, 2, 2)
     top_pixel_freqs = pixel_freqs[:20]
     
     plt.bar(range(len(top_labels)), top_pixel_freqs)
-    plt.xlabel('标签ID')
-    plt.ylabel('像素频率')
-    plt.title(f'{split_name} - 前20个最常见标签（像素维度）')
+    plt.xlabel('Label ID')
+    plt.ylabel('Pixel Frequency')
+    plt.title(f'{split_name} - Top 20 Most Common Labels (Pixel Dimension)')
     plt.xticks(range(len(top_labels)), top_labels, rotation=45)
     plt.grid(True, alpha=0.3)
     
@@ -130,38 +130,38 @@ def visualize_label_distribution(stats, save_dir="./analysis_results"):
                 dpi=300, bbox_inches='tight')
     plt.close()
     
-    # 3. 标签分布直方图
+    # 3. Label distribution histograms
     plt.figure(figsize=(12, 8))
     
     plt.subplot(2, 2, 1)
     plt.hist(sample_freqs, bins=50, alpha=0.7, edgecolor='black')
-    plt.xlabel('样本频率')
-    plt.ylabel('标签数量')
-    plt.title(f'{split_name} - 样本频率分布')
+    plt.xlabel('Sample Frequency')
+    plt.ylabel('Number of Labels')
+    plt.title(f'{split_name} - Sample Frequency Distribution')
     plt.grid(True, alpha=0.3)
     
     plt.subplot(2, 2, 2)
     plt.hist(pixel_freqs, bins=50, alpha=0.7, edgecolor='black', color='orange')
-    plt.xlabel('像素频率')
-    plt.ylabel('标签数量')
-    plt.title(f'{split_name} - 像素频率分布')
+    plt.xlabel('Pixel Frequency')
+    plt.ylabel('Number of Labels')
+    plt.title(f'{split_name} - Pixel Frequency Distribution')
     plt.grid(True, alpha=0.3)
     
     plt.subplot(2, 2, 3)
     pixel_counts = list(stats['label_pixel_counts'].values())
     plt.hist(pixel_counts, bins=50, alpha=0.7, edgecolor='black', color='green')
-    plt.xlabel('总像素数 (log scale)')
-    plt.ylabel('标签数量')
-    plt.title(f'{split_name} - 标签像素数分布')
+    plt.xlabel('Total Pixel Count (log scale)')
+    plt.ylabel('Number of Labels')
+    plt.title(f'{split_name} - Label Pixel Count Distribution')
     plt.yscale('log')
     plt.grid(True, alpha=0.3)
     
     plt.subplot(2, 2, 4)
     sample_counts = list(stats['label_counts'].values())
     plt.hist(sample_counts, bins=50, alpha=0.7, edgecolor='black', color='red')
-    plt.xlabel('样本数量')
-    plt.ylabel('标签数量')
-    plt.title(f'{split_name} - 标签样本数分布')
+    plt.xlabel('Sample Count')
+    plt.ylabel('Number of Labels')
+    plt.title(f'{split_name} - Label Sample Count Distribution')
     plt.grid(True, alpha=0.3)
     
     plt.tight_layout()

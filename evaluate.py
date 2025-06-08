@@ -113,7 +113,7 @@ def evaluate_model(model_path=None, dataset_split='validation'):
                 # Apply 1% area threshold: filter out predictions with area < 1%
                 batch_size, height, width = pred_masks.shape
                 total_pixels = height * width
-                area_threshold = 0.02  # 1%
+                area_threshold = 0.05  # 1%
                 min_pixels = int(total_pixels * area_threshold)
                 
                 # Filter small predictions for each image in batch

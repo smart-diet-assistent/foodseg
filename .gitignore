@@ -1,3 +1,5 @@
+esp32_deployment/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -132,7 +134,7 @@ dmypy.json
 data/
 cache/
 models/
-results/
+# results/
 logs/
 outputs/
 checkpoints/
@@ -147,9 +149,7 @@ wandb/
 *.7z
 
 # Image and video files
-*.jpg
-*.jpeg
-*.png
+
 *.gif
 *.bmp
 *.tiff
