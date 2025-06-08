@@ -8,75 +8,112 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 from config import *
 
 
-def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixels=100):
+def _process_sample(args):
     """
-    筛选数据集，只保留包含指定标签的样本。
+    处理单个样本的辅助函数，用于多线程处理。
+    
+    Args:
+        args: 包含 (idx, sample, desired_labels, min_label_pixels) 的元组
+    
+    Returns:
+        tuple: (idx, has_desired_label, label_counts) 或 (idx, None, None) 如果出错
+    """
+    idx, sample, desired_labels, min_label_pixels = args
+    
+    try:
+        # 获取mask
+        mask = sample['label'] if 'label' in sample else sample['mask']
+        if isinstance(mask, Image.Image):
+            mask = np.array(mask)
+        
+        # 确保mask是单通道
+        if len(mask.shape) == 3:
+            mask = mask[:, :, 0]
+        
+        # 获取mask中的唯一标签
+        unique_labels = np.unique(mask)
+        
+        # 检查是否包含指定标签
+        has_desired_label = False
+        label_counts = {}
+        
+        for label in unique_labels:
+            if label in desired_labels:
+                label_pixels = np.sum(mask == label)
+                if label_pixels >= min_label_pixels:
+                    has_desired_label = True
+                    # 记录这个标签在当前样本中出现
+                    label_counts[label] = 1
+        
+        return idx, has_desired_label, label_counts
+        
+    except Exception as e:
+        print(f"处理样本 {idx} 时出错: {str(e)}")
+        return idx, None, None
+
+
+def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixels=100, num_threads=None):
+    """
+    筛选数据集，只保留包含指定标签的样本（多线程加速版本）。
     
     Args:
         dataset_split: 数据集分割（train/validation/test）
         desired_labels: 需要保留的标签ID列表，None表示保留所有标签
         min_label_pixels: 最小像素阈值，标签像素数少于此值的样本将被过滤
+        num_threads: 线程数，None表示自动选择（通常为CPU核心数）
     
     Returns:
         filtered_indices: 筛选后的有效样本索引列表
         label_mapping: 标签重新映射字典（原标签ID -> 新标签ID）
     """
-    print(f"开始筛选数据集...")
+    print(f"开始筛选数据集（多线程加速）...")
     print(f"原始样本数: {len(dataset_split)}")
     
     if desired_labels is None:
         print("未指定标签筛选，保留所有样本")
         return list(range(len(dataset_split))), None
     
+    # 确定线程数
+    if num_threads is None:
+        num_threads = min(os.cpu_count(), 16)  # 限制最大线程数为16
+    
     print(f"指定保留的标签: {desired_labels}")
     print(f"最小像素阈值: {min_label_pixels}")
+    print(f"使用线程数: {num_threads}")
     
     filtered_indices = []
     label_stats = {}
+    stats_lock = Lock()  # 用于保护label_stats的线程锁
     
-    # 遍历所有样本
-    for idx in tqdm(range(len(dataset_split)), desc="筛选样本"):
-        try:
-            sample = dataset_split[idx]
+    # 准备任务参数
+    tasks = []
+    for idx in range(len(dataset_split)):
+        sample = dataset_split[idx]
+        tasks.append((idx, sample, desired_labels, min_label_pixels))
+    
+    # 使用线程池处理样本
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        # 提交所有任务
+        future_to_idx = {executor.submit(_process_sample, task): task[0] for task in tasks}
+        
+        # 处理完成的任务
+        for future in tqdm(as_completed(future_to_idx), total=len(tasks), desc="筛选样本"):
+            idx, has_desired_label, label_counts = future.result()
             
-            # 获取mask
-            mask = sample['label'] if 'label' in sample else sample['mask']
-            if isinstance(mask, Image.Image):
-                mask = np.array(mask)
-            
-            # 确保mask是单通道
-            if len(mask.shape) == 3:
-                mask = mask[:, :, 0]
-            
-            # 获取mask中的唯一标签
-            unique_labels = np.unique(mask)
-            
-            # 检查是否包含指定标签
-            has_desired_label = False
-            valid_pixels = 0
-            
-            for label in unique_labels:
-                if label in desired_labels:
-                    label_pixels = np.sum(mask == label)
-                    if label_pixels >= min_label_pixels:
-                        has_desired_label = True
-                        valid_pixels += label_pixels
-                        
-                        # 统计标签出现次数
-                        if label not in label_stats:
-                            label_stats[label] = 0
-                        label_stats[label] += 1
-            
-            # 如果包含所需标签且满足像素阈值，则保留该样本
             if has_desired_label:
                 filtered_indices.append(idx)
                 
-        except Exception as e:
-            print(f"处理样本 {idx} 时出错: {str(e)}")
-            continue
+                # 线程安全地更新标签统计
+                with stats_lock:
+                    for label in label_counts:
+                        if label not in label_stats:
+                            label_stats[label] = 0
+                        label_stats[label] += 1
     
     print(f"筛选后样本数: {len(filtered_indices)}")
     print(f"筛选比例: {len(filtered_indices)/len(dataset_split)*100:.2f}%")
@@ -89,10 +126,32 @@ def filter_dataset_by_labels(dataset_split, desired_labels=None, min_label_pixel
     # 创建标签重新映射
     label_mapping = None
     if REMAP_LABELS and desired_labels:
-        # 只为实际出现的标签创建映射
-        present_labels = sorted(list(label_stats.keys()))
-        label_mapping = {old_label: new_label for new_label, old_label in enumerate(present_labels)}
+        # 背景标签（0）保持为0，指定保留的标签按顺序映射为1到标签数量
+        # 其他未指定的标签都映射为背景（0）
+        
+        # 只为实际出现且在desired_labels中的标签创建映射
+        present_desired_labels = [label for label in desired_labels if label in label_stats]
+        present_desired_labels = sorted(present_desired_labels)
+        
+        # 创建映射：背景（0）->0，其他指定标签按顺序映射为1,2,3...
+        label_mapping = {}
+        
+        # 如果存在背景标签0，保持映射为0
+        if 0 in label_stats:
+            label_mapping[0] = 0
+        
+        # 其他指定保留的标签按顺序映射为1,2,3...
+        new_label_id = 1
+        for old_label in present_desired_labels:
+            if old_label != 0:  # 跳过背景标签
+                label_mapping[old_label] = new_label_id
+                new_label_id += 1
+        
         print(f"\n标签映射: {label_mapping}")
+        print(f"映射后的类别数量: {len(label_mapping)} ")
+        print(f"指定保留的标签: {present_desired_labels}")
+        
+        # 所有其他标签（未在desired_labels中的）将在数据集中被映射为背景（0）
     
     return filtered_indices, label_mapping
 
@@ -152,7 +211,13 @@ def prepare_dataset():
         # 更新类别数量
         global NUM_CLASSES
         NUM_CLASSES = len(global_label_mapping)
-        print(f"更新后的类别数量: {NUM_CLASSES}")
+        print(f"更新后的类别数量: {NUM_CLASSES} (包括背景)")
+        
+        # 显示最终的标签映射信息
+        print(f"最终标签映射: {global_label_mapping}")
+        background_count = sum(1 for v in global_label_mapping.values() if v == 0)
+        food_count = len(global_label_mapping) - background_count
+        print(f"背景类: {background_count}个, 食物类: {food_count}个")
     
     return filtered_dataset, global_label_mapping
 
@@ -190,14 +255,14 @@ class FoodSegDataset(Dataset):
         
         # Apply label mapping if provided
         if self.label_mapping is not None:
-            mapped_mask = np.zeros_like(mask)
+            mapped_mask = np.zeros_like(mask)  # 默认所有像素都是背景（0）
+            
+            # 应用标签映射
             for old_label, new_label in self.label_mapping.items():
                 mapped_mask[mask == old_label] = new_label
-            # 将未映射的标签设为背景（0）
-            unmapped_pixels = np.ones_like(mask, dtype=bool)
-            for old_label in self.label_mapping.keys():
-                unmapped_pixels &= (mask != old_label)
-            mapped_mask[unmapped_pixels] = 0
+            
+            # 注意：未在label_mapping中的标签会保持为背景（0）
+            # 这样就实现了"其他未指定的标签都映射为背景"的需求
             mask = mapped_mask
         
         # Apply transformations
