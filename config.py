@@ -12,7 +12,7 @@ ENABLE_DATASET_CACHE = True  # 是否启用数据集缓存
 
 # Model configuration
 MODEL_NAME = "lraspp_mobilenet_v3_large"
-NUM_CLASSES = 32  # 103 food classes + background
+NUM_CLASSES = 33  # 103 food classes + background
 BACKBONE = "mobilenet_v3_large"
 
 # Label filtering configuration
@@ -72,10 +72,26 @@ MIN_LABEL_PIXELS = 1000
 
 # Training configuration
 BATCH_SIZE = 8
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 5e-4  # 降低学习率，从1e-3改为5e-4
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
 MOMENTUM = 0.9
+
+# Advanced training configuration
+USE_FOCAL_LOSS = True  # 启用焦点损失
+FOCAL_ALPHA = 1.0
+FOCAL_GAMMA = 2.0
+CLASS_WEIGHT_METHOD = 'inverse_freq'  # 'inverse_freq', 'median_freq', 'effective_num'
+LOSS_WEIGHTS = {
+    'ce_weight': 1.0,
+    'dice_weight': 0.5,
+    'focal_weight': 0.5
+}
+
+# Learning rate scheduling
+LR_SCHEDULE = 'cosine'  # 'cosine', 'step', 'plateau'
+LR_WARMUP_EPOCHS = 5  # 预热轮数
+LR_MIN_RATIO = 0.01   # 最小学习率比例
 
 # Image configuration
 IMAGE_SIZE = (512, 512)
@@ -97,10 +113,15 @@ RESULTS_DIR = "./results"
 LOG_DIR = "./logs"
 
 # Augmentation parameters
-AUGMENTATION_PROB = 0.5
-ROTATION_LIMIT = 15
-BRIGHTNESS_LIMIT = 0.2
-CONTRAST_LIMIT = 0.2
+AUGMENTATION_PROB = 0.7  # 增加数据增强概率
+ROTATION_LIMIT = 20      # 增加旋转角度
+BRIGHTNESS_LIMIT = 0.3   # 增加亮度变化
+CONTRAST_LIMIT = 0.3     # 增加对比度变化
+# 新增数据增强参数
+HFLIP_PROB = 0.5         # 水平翻转概率
+VFLIP_PROB = 0.1         # 垂直翻转概率（食物图像通常不需要垂直翻转）
+BLUR_LIMIT = 3           # 模糊核大小
+NOISE_VAR_LIMIT = 0.01   # 噪声方差限制
 
 # Evaluation metrics
 METRICS = ["pixel_accuracy", "mean_iou", "class_iou", "dice_score"]

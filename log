@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/Users/yummy/Code/foodseg/train.py", line 14, in <module>
-    from utils import SegmentationLoss, calculate_metrics, visualize_predictions, EarlyStopping
-  File "/Users/yummy/Code/foodseg/utils.py", line 5, in <module>
-    from sklearn.metrics import accuracy_score
-ModuleNotFoundError: No module named 'sklearn'

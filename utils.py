@@ -1,10 +1,13 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
 import cv2
+from tqdm import tqdm
+from tqdm import tqdm
 
 
 def pixel_accuracy(pred, target, ignore_index=255):
@@ -115,21 +118,63 @@ def dice_score(pred, target, num_classes, ignore_index=255, smooth=1e-6):
     return np.mean(valid_scores), dice_scores
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss implementation for handling class imbalance.
+    """
+    def __init__(self, alpha=1.0, gamma=2.0, ignore_index=255, class_weights=None):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.ignore_index = ignore_index
+        self.class_weights = class_weights
+        
+    def forward(self, inputs, targets):
+        # Calculate cross entropy loss
+        ce_loss = F.cross_entropy(inputs, targets, 
+                                 weight=self.class_weights, 
+                                 ignore_index=self.ignore_index, 
+                                 reduction='none')
+        
+        # Calculate focal weight
+        pt = torch.exp(-ce_loss)
+        focal_weight = self.alpha * (1 - pt) ** self.gamma
+        
+        # Apply focal weight
+        focal_loss = focal_weight * ce_loss
+        
+        return focal_loss.mean()
+
+
 class SegmentationLoss(nn.Module):
     """
-    Combined loss for semantic segmentation.
+    Enhanced loss for semantic segmentation with focal loss and class weights.
     """
     
-    def __init__(self, ce_weight=1.0, dice_weight=0.5, ignore_index=255):
+    def __init__(self, ce_weight=1.0, dice_weight=0.5, focal_weight=0.5, 
+                 ignore_index=255, class_weights=None, use_focal=True,
+                 focal_alpha=1.0, focal_gamma=2.0):
         super(SegmentationLoss, self).__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
+        self.focal_weight = focal_weight
         self.ignore_index = ignore_index
+        self.use_focal = use_focal
         
-        self.ce_loss = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        # Standard CrossEntropy loss with class weights
+        self.ce_loss = nn.CrossEntropyLoss(weight=class_weights, ignore_index=ignore_index)
+        
+        # Focal loss for hard examples
+        if use_focal:
+            self.focal_loss = FocalLoss(
+                alpha=focal_alpha, 
+                gamma=focal_gamma, 
+                ignore_index=ignore_index,
+                class_weights=class_weights
+            )
     
     def dice_loss(self, pred, target, smooth=1e-6):
-        """Calculate Dice loss."""
+        """Calculate Dice loss with class balancing."""
         pred = F.softmax(pred, dim=1)
         target_one_hot = F.one_hot(target, num_classes=pred.shape[1]).permute(0, 3, 1, 2).float()
         
@@ -139,21 +184,41 @@ class SegmentationLoss(nn.Module):
             pred = pred * mask
             target_one_hot = target_one_hot * mask
         
+        # Calculate Dice loss per class
         intersection = (pred * target_one_hot).sum(dim=(2, 3))
         total = pred.sum(dim=(2, 3)) + target_one_hot.sum(dim=(2, 3))
         
         dice = (2.0 * intersection + smooth) / (total + smooth)
+        
+        # Weight classes by inverse frequency (if class weights available)
+        if hasattr(self, 'ce_loss') and self.ce_loss.weight is not None:
+            class_weights = self.ce_loss.weight.to(dice.device)
+            # Normalize weights
+            normalized_weights = class_weights / class_weights.sum() * len(class_weights)
+            dice = dice * normalized_weights.unsqueeze(0)
+        
         dice_loss = 1 - dice.mean()
         
         return dice_loss
     
     def forward(self, pred, target):
+        # Standard Cross Entropy Loss
         ce_loss = self.ce_loss(pred, target)
+        
+        # Dice Loss
         dice_loss = self.dice_loss(pred, target)
         
-        total_loss = self.ce_weight * ce_loss + self.dice_weight * dice_loss
+        # Focal Loss (if enabled)
+        focal_loss = 0.0
+        if self.use_focal:
+            focal_loss = self.focal_loss(pred, target)
         
-        return total_loss, ce_loss, dice_loss
+        # Combined loss
+        total_loss = (self.ce_weight * ce_loss + 
+                     self.dice_weight * dice_loss + 
+                     self.focal_weight * focal_loss)
+        
+        return total_loss, ce_loss, dice_loss, focal_loss
 
 
 def visualize_predictions(images, predictions, targets, class_names=None, num_samples=4):
@@ -299,3 +364,135 @@ class EarlyStopping:
         else:
             self.counter += 1
             return self.counter >= self.patience
+
+
+def calculate_class_weights(dataset, num_classes, method='inverse_freq', smooth=1.0):
+    """
+    Calculate class weights for addressing class imbalance.
+    
+    Args:
+        dataset: Dataset to analyze
+        num_classes: Number of classes
+        method: Weight calculation method ('inverse_freq', 'median_freq', 'effective_num')
+        smooth: Smoothing factor
+    
+    Returns:
+        torch.Tensor: Class weights
+    """
+    print("Calculating class weights from dataset...")
+    
+    class_pixel_counts = torch.zeros(num_classes, dtype=torch.float32)
+    total_pixels = 0
+    
+    # Count pixels for each class
+    for i, (_, mask) in enumerate(tqdm(dataset, desc="Analyzing class distribution")):
+        if i % 100 == 0 and i > 0:  # Sample every 100th to speed up for large datasets
+            continue
+            
+        unique_classes, counts = torch.unique(mask, return_counts=True)
+        for cls, count in zip(unique_classes, counts):
+            if cls < num_classes:
+                class_pixel_counts[cls] += count.float()
+                total_pixels += count.item()
+    
+    # Calculate weights based on method
+    if method == 'inverse_freq':
+        # Inverse frequency weighting
+        class_frequencies = class_pixel_counts / total_pixels
+        class_weights = 1.0 / (class_frequencies + smooth)
+        
+    elif method == 'median_freq':
+        # Median frequency weighting
+        median_freq = torch.median(class_pixel_counts[class_pixel_counts > 0])
+        class_weights = median_freq / (class_pixel_counts + smooth)
+        
+    elif method == 'effective_num':
+        # Effective number of samples weighting
+        beta = 0.9999
+        effective_num = 1.0 - torch.pow(beta, class_pixel_counts)
+        class_weights = (1.0 - beta) / (effective_num + 1e-8)
+    
+    else:
+        raise ValueError(f"Unknown weighting method: {method}")
+    
+    # Normalize weights so that they sum to num_classes
+    class_weights = class_weights / class_weights.mean()
+    
+    # Set background weight to lower value to reduce its dominance
+    if class_weights[0] > 0:
+        class_weights[0] = class_weights[0] * 0.5
+    
+    print(f"Class weights calculated using {method}:")
+    for i, weight in enumerate(class_weights):
+        if class_pixel_counts[i] > 0:
+            print(f"  Class {i}: weight={weight:.4f}, pixels={int(class_pixel_counts[i])}")
+    
+    return class_weights
+
+
+class CosineAnnealingWarmupRestarts(optim.lr_scheduler._LRScheduler):
+    """
+    Cosine annealing scheduler with warmup and restarts.
+    """
+    def __init__(self, optimizer, first_cycle_steps, cycle_mult=1., max_lr=0.1, min_lr=0.001, 
+                 warmup_steps=0, gamma=1., last_epoch=-1):
+        self.first_cycle_steps = first_cycle_steps
+        self.cycle_mult = cycle_mult
+        self.base_max_lr = max_lr
+        self.max_lr = max_lr
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.gamma = gamma
+        
+        self.cur_cycle_steps = first_cycle_steps
+        self.cycle = 0
+        self.step_in_cycle = last_epoch
+        
+        super(CosineAnnealingWarmupRestarts, self).__init__(optimizer, last_epoch)
+        
+        self.init_lr()
+    
+    def init_lr(self):
+        self.base_lrs = []
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.min_lr
+            self.base_lrs.append(self.min_lr)
+    
+    def get_lr(self):
+        if self.step_in_cycle == -1:
+            return self.base_lrs
+        elif self.step_in_cycle < self.warmup_steps:
+            return [(self.max_lr - base_lr) * self.step_in_cycle / self.warmup_steps + base_lr 
+                    for base_lr in self.base_lrs]
+        else:
+            return [base_lr + (self.max_lr - base_lr) * \
+                    (1 + np.cos(np.pi * (self.step_in_cycle - self.warmup_steps) / 
+                               (self.cur_cycle_steps - self.warmup_steps))) / 2
+                    for base_lr in self.base_lrs]
+    
+    def step(self, epoch=None):
+        if epoch is None:
+            epoch = self.last_epoch + 1
+            self.step_in_cycle = self.step_in_cycle + 1
+            if self.step_in_cycle >= self.cur_cycle_steps:
+                self.cycle += 1
+                self.step_in_cycle = self.step_in_cycle - self.cur_cycle_steps
+                self.cur_cycle_steps = int((self.cur_cycle_steps - self.warmup_steps) * self.cycle_mult) + self.warmup_steps
+        else:
+            if epoch >= self.first_cycle_steps:
+                if self.cycle_mult == 1.:
+                    self.step_in_cycle = epoch % self.first_cycle_steps
+                    self.cycle = epoch // self.first_cycle_steps
+                else:
+                    n = int(np.log((epoch / self.first_cycle_steps * (self.cycle_mult - 1) + 1), self.cycle_mult))
+                    self.cycle = n
+                    self.step_in_cycle = epoch - int(self.first_cycle_steps * (self.cycle_mult ** n - 1) / (self.cycle_mult - 1))
+                    self.cur_cycle_steps = self.first_cycle_steps * self.cycle_mult ** (n)
+            else:
+                self.cur_cycle_steps = self.first_cycle_steps
+                self.step_in_cycle = epoch
+                
+        self.max_lr = self.base_max_lr * (self.gamma ** self.cycle)
+        self.last_epoch = np.floor(epoch)
+        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
+            param_group['lr'] = lr

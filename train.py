@@ -12,7 +12,8 @@ import time
 
 from dataset import prepare_dataset, create_dataloaders
 from model import create_model
-from utils import SegmentationLoss, calculate_metrics, visualize_predictions, EarlyStopping
+from utils import (SegmentationLoss, calculate_metrics, visualize_predictions, EarlyStopping,
+                  calculate_class_weights, CosineAnnealingWarmupRestarts)
 from config import *
 from wandb_config import get_wandb_config
 
@@ -30,6 +31,7 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_
     total_loss = 0
     total_ce_loss = 0
     total_dice_loss = 0
+    total_focal_loss = 0
     
     # Clear GPU memory before starting epoch
     clear_gpu_memory()
@@ -72,7 +74,12 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_
                     raise e
             
             # Calculate loss
-            total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
+            loss_result = criterion(predictions, masks)
+            if len(loss_result) == 4:  # New format with focal loss
+                total_loss_batch, ce_loss, dice_loss, focal_loss = loss_result
+            else:  # Backward compatibility
+                total_loss_batch, ce_loss, dice_loss = loss_result
+                focal_loss = torch.tensor(0.0)
             
             # Backward pass with gradient clipping
             total_loss_batch.backward()
@@ -86,24 +93,29 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_
             total_loss += total_loss_batch.item()
             total_ce_loss += ce_loss.item()
             total_dice_loss += dice_loss.item()
+            total_focal_loss += focal_loss.item()
             
             # Update progress bar
             progress_bar.set_postfix({
                 'Loss': f'{total_loss_batch.item():.4f}',
                 'CE': f'{ce_loss.item():.4f}',
-                'Dice': f'{dice_loss.item():.4f}'
+                'Dice': f'{dice_loss.item():.4f}',
+                'Focal': f'{focal_loss.item():.4f}' if USE_FOCAL_LOSS else '0.0000'
             })
             
             # Log batch metrics to wandb (configurable frequency)
             wandb_cfg = get_wandb_config()
             if batch_idx % wandb_cfg["batch_log_frequency"] == 0:
-                wandb.log({
+                batch_metrics = {
                     "batch/train_loss": total_loss_batch.item(),
                     "batch/train_ce_loss": ce_loss.item(),
                     "batch/train_dice_loss": dice_loss.item(),
                     "batch/learning_rate": optimizer.param_groups[0]['lr'],
                     "batch/epoch": epoch + (batch_idx / len(train_loader))
-                })
+                }
+                if USE_FOCAL_LOSS:
+                    batch_metrics["batch/train_focal_loss"] = focal_loss.item()
+                wandb.log(batch_metrics)
             
             # Periodically clear memory to prevent fragmentation
             if batch_idx % 5 == 0:  # 更频繁地清理内存
@@ -111,6 +123,8 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_
                 
             # 删除不必要的中间变量，释放内存
             del outputs, predictions, total_loss_batch, ce_loss, dice_loss
+            if USE_FOCAL_LOSS:
+                del focal_loss
                 
         except RuntimeError as e:
             if "out of memory" in str(e) or "cuDNN" in str(e):
@@ -124,8 +138,12 @@ def train_epoch(model, train_loader, criterion, optimizer, device, epoch, total_
     avg_loss = total_loss / len(train_loader)
     avg_ce_loss = total_ce_loss / len(train_loader)
     avg_dice_loss = total_dice_loss / len(train_loader)
+    avg_focal_loss = total_focal_loss / len(train_loader)
     
-    return avg_loss, avg_ce_loss, avg_dice_loss
+    if USE_FOCAL_LOSS:
+        return avg_loss, avg_ce_loss, avg_dice_loss, avg_focal_loss
+    else:
+        return avg_loss, avg_ce_loss, avg_dice_loss
 
 
 def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, total_epochs):
@@ -134,6 +152,7 @@ def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, tot
     total_loss = 0
     total_ce_loss = 0
     total_dice_loss = 0
+    total_focal_loss = 0
     
     # 改为累积式计算指标，避免存储所有预测结果
     total_pixel_correct = 0
@@ -185,12 +204,18 @@ def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, tot
                         raise e
                 
                 # Calculate loss
-                total_loss_batch, ce_loss, dice_loss = criterion(predictions, masks)
+                loss_result = criterion(predictions, masks)
+                if len(loss_result) == 4:  # New format with focal loss
+                    total_loss_batch, ce_loss, dice_loss, focal_loss = loss_result
+                else:  # Backward compatibility
+                    total_loss_batch, ce_loss, dice_loss = loss_result
+                    focal_loss = torch.tensor(0.0)
                 
                 # Update losses
                 total_loss += total_loss_batch.item()
                 total_ce_loss += ce_loss.item()
                 total_dice_loss += dice_loss.item()
+                total_focal_loss += focal_loss.item()
                 
                 # Get predictions for metrics (移动到CPU立即计算指标)
                 pred_masks = torch.argmax(predictions, dim=1).cpu()
@@ -229,7 +254,8 @@ def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, tot
                 progress_bar.set_postfix({
                     'Loss': f'{total_loss_batch.item():.4f}',
                     'CE': f'{ce_loss.item():.4f}',
-                    'Dice': f'{dice_loss.item():.4f}'
+                    'Dice': f'{dice_loss.item():.4f}',
+                    'Focal': f'{focal_loss.item():.4f}' if USE_FOCAL_LOSS else '0.0000'
                 })
                 
                 # Periodically clear memory
@@ -282,15 +308,18 @@ def validate_epoch(model, val_loader, criterion, device, num_classes, epoch, tot
         'dice_score': dice_score,
         'class_dice': class_dice
     }
-    
     avg_loss = total_loss / len(val_loader)
     avg_ce_loss = total_ce_loss / len(val_loader)
     avg_dice_loss = total_dice_loss / len(val_loader)
-    
+    avg_focal_loss = total_focal_loss / len(val_loader)
+
     # 最后清理一次内存
     clear_gpu_memory()
-    
-    return avg_loss, avg_ce_loss, avg_dice_loss, metrics, sample_predictions, sample_targets, sample_images
+
+    if USE_FOCAL_LOSS:
+        return avg_loss, avg_ce_loss, avg_dice_loss, avg_focal_loss, metrics, sample_predictions, sample_targets, sample_images
+    else:
+        return avg_loss, avg_ce_loss, avg_dice_loss, metrics, sample_predictions, sample_targets, sample_images
 
 
 def save_checkpoint(model, optimizer, epoch, metrics, filepath):
@@ -350,26 +379,64 @@ def train():
     
     print(f"Training batches: {len(train_loader)}")
     print(f"Validation batches: {len(val_loader)}")
-    
-    # Create model
+     # Create model
     print("Creating model...")
     # 如果有标签映射，使用映射后的类别数，否则使用配置中的默认值
     num_classes = len(label_mapping) if label_mapping else NUM_CLASSES
     model = create_model(num_classes, pretrained=True)
     model = model.to(device)
-    
+
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {total_params:,}")
     print(f"Number of classes: {num_classes}")
+
+    # Calculate class weights for handling class imbalance
+    print("\nCalculating class weights...")
+    train_dataset_for_weights = dataset['train']
     
-    # Loss and optimizer
-    criterion = SegmentationLoss(ce_weight=1.0, dice_weight=0.5)
+    # Create a temporary dataset instance to calculate weights
+    from dataset import FoodSegDataset, get_train_transforms
+    temp_dataset = FoodSegDataset(train_dataset_for_weights, 
+                                 transform=None,  # No augmentation for weight calculation
+                                 label_mapping=label_mapping)
+    
+    class_weights = calculate_class_weights(
+        temp_dataset, 
+        num_classes, 
+        method=CLASS_WEIGHT_METHOD
+    )
+    class_weights = class_weights.to(device)
+    
+    # Loss and optimizer with class weights and focal loss
+    criterion = SegmentationLoss(
+        ce_weight=LOSS_WEIGHTS['ce_weight'], 
+        dice_weight=LOSS_WEIGHTS['dice_weight'],
+        focal_weight=LOSS_WEIGHTS['focal_weight'],
+        class_weights=class_weights,
+        use_focal=USE_FOCAL_LOSS,
+        focal_alpha=FOCAL_ALPHA,
+        focal_gamma=FOCAL_GAMMA
+    )
+    
     optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     
     # Learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.5, patience=5
-    )
+    if LR_SCHEDULE == 'cosine':
+        scheduler = CosineAnnealingWarmupRestarts(
+            optimizer,
+            first_cycle_steps=NUM_EPOCHS,
+            max_lr=LEARNING_RATE,
+            min_lr=LEARNING_RATE * LR_MIN_RATIO,
+            warmup_steps=LR_WARMUP_EPOCHS
+        )
+    elif LR_SCHEDULE == 'step':
+        scheduler = optim.lr_scheduler.StepLR(
+            optimizer, step_size=NUM_EPOCHS//3, gamma=0.5
+        )
+    else:  # plateau
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=5
+        )
     
     # Early stopping
     early_stopping = EarlyStopping(patience=EARLY_STOPPING_PATIENCE, mode='max')
@@ -411,9 +478,14 @@ def train():
         "scheduler": "ReduceLROnPlateau",
         
         # Loss configuration
-        "loss_function": "CE + Dice",
-        "ce_weight": 1.0,
-        "dice_weight": 0.5,
+        "loss_function": "CE + Dice + Focal" if USE_FOCAL_LOSS else "CE + Dice",
+        "ce_weight": LOSS_WEIGHTS['ce_weight'],
+        "dice_weight": LOSS_WEIGHTS['dice_weight'],
+        "focal_weight": LOSS_WEIGHTS['focal_weight'] if USE_FOCAL_LOSS else 0,
+        "use_focal_loss": USE_FOCAL_LOSS,
+        "focal_alpha": FOCAL_ALPHA,
+        "focal_gamma": FOCAL_GAMMA,
+        "class_weight_method": CLASS_WEIGHT_METHOD,
         
         # Data augmentation
         "augmentation_prob": AUGMENTATION_PROB,
@@ -495,23 +567,40 @@ def train():
         print("-" * 50)
         
         # Training
-        train_loss, train_ce_loss, train_dice_loss = train_epoch(
+        train_result = train_epoch(
             model, train_loader, criterion, optimizer, device, epoch, NUM_EPOCHS, num_classes
         )
         
+        if USE_FOCAL_LOSS:
+            train_loss, train_ce_loss, train_dice_loss, train_focal_loss = train_result
+        else:
+            train_loss, train_ce_loss, train_dice_loss = train_result
+            train_focal_loss = 0.0
+        
         # Validation
-        val_loss, val_ce_loss, val_dice_loss, metrics, sample_preds, sample_targets, sample_images = validate_epoch(
+        val_result = validate_epoch(
             model, val_loader, criterion, device, num_classes, epoch, NUM_EPOCHS
         )
         
+        if USE_FOCAL_LOSS:
+            val_loss, val_ce_loss, val_dice_loss, val_focal_loss, metrics, sample_preds, sample_targets, sample_images = val_result
+        else:
+            val_loss, val_ce_loss, val_dice_loss, metrics, sample_preds, sample_targets, sample_images = val_result
+            val_focal_loss = 0.0
+        
         # Update learning rate
-        scheduler.step(metrics['mean_iou'])
+        if LR_SCHEDULE == 'plateau':
+            scheduler.step(metrics['mean_iou'])
+        else:
+            scheduler.step()
         
         # Log metrics
         current_lr = optimizer.param_groups[0]['lr']
         
-        print(f"Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}, Dice: {train_dice_loss:.4f})")
-        print(f"Val Loss: {val_loss:.4f} (CE: {val_ce_loss:.4f}, Dice: {val_dice_loss:.4f})")
+        print(f"Train Loss: {train_loss:.4f} (CE: {train_ce_loss:.4f}, Dice: {train_dice_loss:.4f}" + 
+              (f", Focal: {train_focal_loss:.4f})" if USE_FOCAL_LOSS else ")"))
+        print(f"Val Loss: {val_loss:.4f} (CE: {val_ce_loss:.4f}, Dice: {val_dice_loss:.4f}" +
+              (f", Focal: {val_focal_loss:.4f})" if USE_FOCAL_LOSS else ")"))
         print(f"Val mIoU: {metrics['mean_iou']:.4f}")
         print(f"Val Dice: {metrics['dice_score']:.4f}")
         print(f"Val Pixel Acc: {metrics['pixel_accuracy']:.4f}")
@@ -542,6 +631,13 @@ def train():
             # Additional metrics
             "best_miou": best_miou
         }
+        
+        # Add focal loss metrics if enabled
+        if USE_FOCAL_LOSS:
+            wandb_metrics.update({
+                "train/focal_loss": train_focal_loss,
+                "val/focal_loss": val_focal_loss
+            })
         
         # Create prediction visualization for wandb
         if len(sample_images) > 0 and wandb_cfg["save_prediction_artifacts"]:
