@@ -1,5 +1,11 @@
 # FoodSeg103 Semantic Segmentation with LRASPP
 
+> English | [简体中文](README_zh.md)
+
+[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-1.9+-red.svg)](https://pytorch.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 This project implements semantic segmentation on the FoodSeg103 dataset using the LRASPP (Lite Reduced Atrous Spatial Pyramid Pooling) model, with advanced data filtering capabilities.
 
 ## Dataset
@@ -126,15 +132,59 @@ foodseg/
 ├── prepare_dataset.py           # Dataset preparation
 ├── analyze_dataset.py           # Dataset analysis tool
 ├── label_filtering_examples.py  # Configuration examples
-└── README.md                    # This file
+├── README.md                    # English documentation
+├── README_zh.md                 # Chinese documentation
+├── LICENSE                      # MIT License
+├── wandb_config.py              # Weights & Biases configuration
+├── cache_manager.py             # Cache management utilities
+├── CACHE_README.md              # Cache system documentation
+├── convert_to_tflite.py         # TensorFlow Lite conversion
+├── test_inference.py            # Inference testing
+├── test_lraspp_inputs.py        # Model input testing
+└── inference_demo.py            # Interactive inference demo
 
 # Generated directories:
 ├── data/                        # Dataset cache
 │   └── label_mapping.json      # Label mapping file
+├── cache/                       # Hugging Face dataset cache
+│   └── filtered_datasets/      # Filtered dataset cache
 ├── models/                      # Saved models
-├── results/                     # Training results
+│   ├── best_model.pth          # PyTorch model
+│   ├── food_segmentation_model.onnx  # ONNX format
+│   ├── food_segmentation_model.tflite # TensorFlow Lite
+│   └── food_segmentation_model_saved_model/ # TensorFlow SavedModel
+├── results/                     # Training results and visualizations
 ├── logs/                        # Training logs
-└── analysis_results/            # Dataset analysis results
+├── analysis_results/            # Dataset analysis results
+├── inference_output/            # Inference output images
+├── esp32_deployment/            # ESP32 deployment files
+└── FoodSegmentationLibrary/     # Arduino library for ESP32
+```
+
+## Model Export & Deployment
+
+### ONNX Export
+```bash
+# Convert trained model to ONNX format
+python convert_to_onnx.py --model_path models/best_model.pth
+```
+
+### TensorFlow Lite Export
+```bash
+# Convert to TensorFlow Lite for mobile deployment
+python convert_to_tflite.py --model_path models/best_model.pth
+```
+
+### ESP32 Deployment
+The project includes ESP32 deployment support:
+- Converted model weights in `esp32_deployment/model_data.cc`
+- Arduino library in `FoodSegmentationLibrary/`
+- Ready for microcontroller deployment
+
+### Interactive Demo
+```bash
+# Run interactive inference demo
+python inference_demo.py
 ```
 
 ## Advanced Usage
@@ -177,6 +227,49 @@ python inference.py --image_path ./test_images/ --batch --output_dir ./results/
 4. **⚖️ Balanced Classes**: Avoid class imbalance issues
 5. **🔧 Easy Debugging**: Simpler to analyze and debug with fewer classes
 
+## Training & Evaluation
+
+### Training Results
+After training, you'll find various outputs in the `results/` directory:
+- `best_predictions_epoch_*.png`: Visualization of best predictions per epoch
+- `comprehensive_evaluation_results.txt`: Detailed evaluation metrics
+- `comprehensive_metrics.png`: Performance visualization
+- `confusion_matrix.png`: Class confusion matrix
+- `evaluation_metrics.npz`: Numerical evaluation data
+
+### Monitoring Training
+The project supports Weights & Biases integration:
+```bash
+# Configure W&B (optional)
+python wandb_config.py
+
+# Training with W&B logging
+python train.py --use_wandb
+```
+
+### Cache Management
+Efficient dataset caching system:
+```bash
+# Check cache status
+python cache_manager.py --status
+
+# Clear specific cache
+python cache_manager.py --clear filtered
+
+# See CACHE_README.md for detailed cache management
+```
+
+## Testing
+
+### Model Testing
+```bash
+# Test LRASPP model inputs
+python test_lraspp_inputs.py
+
+# Test inference pipeline
+python test_inference.py --image_path image.jpg
+```
+
 ## Performance Tips
 
 1. **Start Small**: Begin with 5-10 classes for initial experiments
@@ -203,3 +296,65 @@ python model.py
 # Validate configuration
 python -c "from config import *; print(f'Classes: {NUM_CLASSES}, Labels: {DESIRED_LABELS}')"
 ```
+
+## FAQ
+
+### Q: How do I choose the right number of classes for my use case?
+A: Start with 5-10 classes for experimentation, then gradually increase. Use `analyze_dataset.py` to understand class distribution and balance.
+
+### Q: What's the difference between REMAP_LABELS=True and False?
+A: When True, labels are remapped to continuous IDs (0,1,2,3...). When False, original label IDs are preserved. Always use True for filtered datasets.
+
+### Q: My training is very slow. How can I speed it up?
+A: 
+- Reduce the number of classes with label filtering
+- Use a smaller batch size if memory is limited
+- Enable mixed precision training
+- Use filtered datasets to reduce data loading time
+
+### Q: Can I use this project for other segmentation datasets?
+A: Yes, modify the dataset loading in `dataset.py` to support your data format. The LRASPP model can work with any semantic segmentation task.
+
+### Q: How do I deploy the model to mobile devices?
+A: Use the TensorFlow Lite conversion script `convert_to_tflite.py` to create a mobile-optimized model, then integrate it into your mobile app.
+
+## Requirements
+
+### System Requirements
+- Python 3.8 or higher
+- CUDA-compatible GPU (recommended for training)
+- 8GB+ RAM for full dataset
+- 4GB+ RAM for filtered datasets
+
+### Dependencies
+```bash
+# Core dependencies
+torch>=1.9.0
+torchvision>=0.10.0
+transformers>=4.20.0
+datasets>=2.0.0
+Pillow>=8.0.0
+numpy>=1.21.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+tqdm>=4.62.0
+
+# Optional dependencies
+onnx>=1.12.0           # For ONNX export
+tensorflow>=2.8.0      # For TensorFlow Lite export
+wandb>=0.12.0          # For experiment tracking
+```
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Contributing
+
+Issues and pull requests are welcome! Please ensure you follow the project's coding standards.
+
+## Acknowledgments
+
+- The creators of the FoodSeg103 dataset
+- PyTorch team for the LRASPP implementation
+- Hugging Face for dataset hosting services
