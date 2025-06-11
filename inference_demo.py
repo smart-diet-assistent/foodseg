@@ -6,6 +6,8 @@
 
 import os
 import sys
+import time
+import psutil
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -76,6 +78,37 @@ def get_reverse_label_mapping(label_mapping):
     return {v: int(k) for k, v in label_mapping.items()}
 
 
+def get_memory_usage(device):
+    """
+    获取当前内存使用情况
+    
+    Args:
+        device: torch设备对象
+    
+    Returns:
+        dict: 内存使用信息
+    """
+    memory_info = {}
+    
+    # CPU内存
+    process = psutil.Process(os.getpid())
+    memory_info['cpu_memory_mb'] = process.memory_info().rss / 1024 / 1024
+    memory_info['cpu_memory_percent'] = process.memory_percent()
+    
+    # GPU内存
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+        memory_info['gpu_memory_allocated_mb'] = torch.cuda.memory_allocated(device) / 1024 / 1024
+        memory_info['gpu_memory_reserved_mb'] = torch.cuda.memory_reserved(device) / 1024 / 1024
+        memory_info['gpu_memory_max_allocated_mb'] = torch.cuda.max_memory_allocated(device) / 1024 / 1024
+    else:
+        memory_info['gpu_memory_allocated_mb'] = 0
+        memory_info['gpu_memory_reserved_mb'] = 0
+        memory_info['gpu_memory_max_allocated_mb'] = 0
+    
+    return memory_info
+
+
 def load_trained_model(model_path):
     """
     加载训练好的模型
@@ -96,6 +129,11 @@ def load_trained_model(model_path):
     else:
         device = torch.device('cpu')
         print("使用CPU")
+    device = torch.device('cpu')
+    
+    # 重置GPU内存统计（如果使用GPU）
+    if device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(device)
     
     # 创建模型
     print("创建模型...")
@@ -244,7 +282,7 @@ def calculate_food_areas(pred_mask, pixel_size_mm2=None):
     return class_areas
 
 
-def create_visualization(original_image, pred_mask, class_areas, save_path=None):
+def create_visualization(original_image, pred_mask, class_areas, save_path=None, performance_info=None):
     """
     创建可视化结果
     
@@ -253,6 +291,7 @@ def create_visualization(original_image, pred_mask, class_areas, save_path=None)
         pred_mask (numpy.ndarray): 预测掩码
         class_areas (dict): 类别面积信息
         save_path (str): 保存路径，可选
+        performance_info (dict): 性能信息，可选
     
     Returns:
         matplotlib.figure.Figure: 可视化图像
@@ -390,6 +429,16 @@ def create_visualization(original_image, pred_mask, class_areas, save_path=None)
                     info_text += f"  Area: {info['area_cm2']:.2f} cm²\n"
                 info_text += "\n"
         
+        # 添加性能信息
+        if performance_info:
+            info_text += "Performance Metrics:\n" + "="*30 + "\n"
+            info_text += f"Inference: {performance_info['inference_time_ms']:.1f} ms\n"
+            info_text += f"Total: {performance_info['total_time_ms']:.1f} ms\n"
+            info_text += f"FPS: {performance_info['total_fps']:.1f}\n"
+            info_text += f"CPU Mem: {performance_info['final_memory']['cpu_memory_mb']:.1f} MB\n"
+            if 'gpu_memory_allocated_mb' in performance_info['final_memory'] and performance_info['final_memory']['gpu_memory_allocated_mb'] > 0:
+                info_text += f"GPU Mem: {performance_info['final_memory']['gpu_memory_allocated_mb']:.1f} MB\n"
+        
         plt.text(0.05, 0.95, info_text, transform=plt.gca().transAxes, 
                 fontsize=10, verticalalignment='top', fontfamily='monospace',
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.5))
@@ -398,7 +447,17 @@ def create_visualization(original_image, pred_mask, class_areas, save_path=None)
                 ha='center', va='center', transform=plt.gca().transAxes,
                 fontsize=12, fontweight='bold')
     
-    plt.suptitle('Food Segmentation Recognition Results', fontsize=16, fontweight='bold', y=0.98)
+    # 在标题中添加性能信息
+    title = 'Food Segmentation Recognition Results'
+    if performance_info:
+        mem_info = ""
+        if performance_info['final_memory']['gpu_memory_allocated_mb'] > 0:
+            mem_info = f", GPU: {performance_info['final_memory']['gpu_memory_allocated_mb']:.0f}MB"
+        else:
+            mem_info = f", CPU: {performance_info['final_memory']['cpu_memory_mb']:.0f}MB"
+        title += f' (Inference: {performance_info["inference_time_ms"]:.1f}ms, FPS: {performance_info["total_fps"]:.1f}{mem_info})'
+    
+    plt.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
     plt.tight_layout()
     
     if save_path:
@@ -424,26 +483,70 @@ def inference_single_image(model, device, image_path, output_dir=None, show_resu
     """
     print(f"正在处理图像: {image_path}")
     
+    # 记录总体开始时间和初始内存
+    total_start_time = time.time()
+    initial_memory = get_memory_usage(device)
+    
     try:
-        # 预处理
+        # 预处理时间测量
+        preprocess_start = time.time()
         image_tensor, original_image, original_size = preprocess_image(image_path)
         print(f"原始图像尺寸: {original_image.shape}")
         print(f"原始尺寸记录: {original_size}")
         image_tensor = image_tensor.to(device)
+        preprocess_time = time.time() - preprocess_start
+        preprocess_memory = get_memory_usage(device)
         
-        # 推理
+        # 推理时间测量
+        inference_start = time.time()
         with torch.no_grad():
             outputs = model(image_tensor)
             predictions = outputs['out']
             pred_mask = torch.argmax(predictions, dim=1)
             print(f"预测输出尺寸: {pred_mask.shape}")
+        inference_time = time.time() - inference_start
+        inference_memory = get_memory_usage(device)
         
-        # 后处理
+        # 后处理时间测量
+        postprocess_start = time.time()
         pred_mask_np = postprocess_prediction(pred_mask, original_size)
         print(f"后处理后掩码尺寸: {pred_mask_np.shape}")
         
         # 计算面积
         class_areas = calculate_food_areas(pred_mask_np)
+        postprocess_time = time.time() - postprocess_start
+        final_memory = get_memory_usage(device)
+        
+        # 计算总时间和性能指标
+        total_time = time.time() - total_start_time
+        fps = 1.0 / total_time
+        inference_fps = 1.0 / inference_time
+        
+        # 计算内存增量
+        memory_increase = {
+            'cpu_memory_increase_mb': final_memory['cpu_memory_mb'] - initial_memory['cpu_memory_mb'],
+            'gpu_memory_increase_mb': final_memory['gpu_memory_allocated_mb'] - initial_memory['gpu_memory_allocated_mb']
+        }
+        
+        # 打印性能统计
+        print("\n" + "="*50)
+        print("推理性能统计")
+        print("="*50)
+        print(f"预处理时间: {preprocess_time*1000:.2f} ms")
+        print(f"模型推理时间: {inference_time*1000:.2f} ms")
+        print(f"后处理时间: {postprocess_time*1000:.2f} ms")
+        print(f"总处理时间: {total_time*1000:.2f} ms")
+        print(f"总体FPS: {fps:.2f}")
+        print(f"纯推理FPS: {inference_fps:.2f}")
+        print("\n内存使用统计:")
+        print(f"CPU内存使用: {final_memory['cpu_memory_mb']:.1f} MB ({final_memory['cpu_memory_percent']:.1f}%)")
+        print(f"CPU内存增量: {memory_increase['cpu_memory_increase_mb']:.1f} MB")
+        if device.type == 'cuda':
+            print(f"GPU内存分配: {final_memory['gpu_memory_allocated_mb']:.1f} MB")
+            print(f"GPU内存保留: {final_memory['gpu_memory_reserved_mb']:.1f} MB")
+            print(f"GPU最大内存: {final_memory['gpu_memory_max_allocated_mb']:.1f} MB")
+            print(f"GPU内存增量: {memory_increase['gpu_memory_increase_mb']:.1f} MB")
+        print("="*50)
         
         # 创建输出文件名
         if output_dir:
@@ -455,8 +558,23 @@ def inference_single_image(model, device, image_path, output_dir=None, show_resu
             result_path = None
             mask_path = None
         
+        # 创建性能信息字典
+        performance_info = {
+            'preprocess_time_ms': preprocess_time * 1000,
+            'inference_time_ms': inference_time * 1000,
+            'postprocess_time_ms': postprocess_time * 1000,
+            'total_time_ms': total_time * 1000,
+            'total_fps': fps,
+            'inference_fps': inference_fps,
+            'initial_memory': initial_memory,
+            'preprocess_memory': preprocess_memory,
+            'inference_memory': inference_memory,
+            'final_memory': final_memory,
+            'memory_increase': memory_increase
+        }
+        
         # 创建可视化
-        fig = create_visualization(original_image, pred_mask_np, class_areas, result_path)
+        fig = create_visualization(original_image, pred_mask_np, class_areas, result_path, performance_info)
         
         # 保存掩码
         if mask_path:
@@ -488,6 +606,7 @@ def inference_single_image(model, device, image_path, output_dir=None, show_resu
             'original_image': original_image,
             'pred_mask': pred_mask_np,
             'class_areas': class_areas,
+            'performance': performance_info,
             'success': True
         }
         
